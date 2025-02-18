@@ -12,7 +12,7 @@ rm -Rf ./pgbin
 git clone https://github.com/orioledb/orioledb
 git clone https://github.com/orioledb/postgres postgresql
 
-if [-z "$ORIOLE_ID"]; then
+if [ -z "$ORIOLE_ID" ]; then
 	echo "Specify at least one orioledb state in ORIOLE_ID"
 	exit 1
 fi
@@ -36,6 +36,9 @@ do
         export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
         ./orioledb/ci/prerequisites.sh
         ./orioledb/ci/build.sh
+	cd orioledb
+	make USE_PGXS=1 -sj `nproc` clean
+	cd ..
 done
 
 if [ -n "$PG_ID" ]; then
