@@ -12,6 +12,11 @@ rm -Rf ./pgbin
 git clone https://github.com/orioledb/orioledb
 git clone https://github.com/orioledb/postgres postgresql
 
+if [-z "$ORIOLE_ID"]; then
+	echo "Specify at least one orioledb state in ORIOLE_ID"
+	exit 1
+fi
+
 for var in $ORIOLE_ID
 do
         cd orioledb
@@ -40,11 +45,11 @@ if [ -n "$PG_ID" ]; then
 		cd postgresql
 		echo "checkout: $PG_ID"
 		git checkout $PG_ID
-		./configure --enable-debug --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE
-		make -sj 64
-		make -sj 64 install
-		make -C contrib -sj 64
-		make -C contrib -sj 64 install
+		./configure --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE
+		make -sj `nproc`
+		make -sj `nproc` install
+		make -C contrib -sj `nproc`
+		make -C contrib -sj `nproc` install
 		cd ..
 	done
 fi
@@ -128,3 +133,4 @@ if [ -n "$PG_ID" ]; then
 fi
 
 export PATH=$OLDPATH
+echo "Oriole-bench tests finished"
