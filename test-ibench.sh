@@ -16,6 +16,7 @@ fi
 
 
 pg_ctl -D $PGDATADIR -l logfile stop
+rm -Rf /ssd/pgdata
 initdb $PGDATADIR --no-locale
 pg_ctl -D $PGDATADIR -l logfile start
 
@@ -36,7 +37,7 @@ echo "Running ibench for commit $PATCH_ID with $ENGINE"
 
 if [ -n "$FAST_RUN" ]; then
 	FAST_RUN_MSG="FAST RUN!"
-	export SCALE_MUL=5
+	export SCALE_MUL=1
 else
 	export SCALE_MUL=100
 fi

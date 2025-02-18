@@ -17,6 +17,7 @@ if [ `which pg_ctl` == "/usr/local/pgsql/bin/pg_ctl" ]; then
 fi
 
 pg_ctl -D $PGDATADIR -l logfile stop
+rm -Rf /ssd/pgdata
 initdb $PGDATADIR --no-locale
 pg_ctl -D $PGDATADIR -l logfile start
 

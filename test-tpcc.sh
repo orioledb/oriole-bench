@@ -7,7 +7,7 @@
 init_cluster () {
 	sudo killall -9 postgres
 	pg_ctl -D $PGDATADIR -l logfile stop
-	rm -R /ssd/pgdata
+	rm -Rf /ssd/pgdata
         sleep 10
         initdb $PGDATADIR --no-locale
         pg_ctl -D $PGDATADIR -l logfile start

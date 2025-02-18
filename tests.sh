@@ -27,7 +27,7 @@ do
         export LLVM_VER=17
         export CHECK_TYPE=normal
         export GITHUB_ENV=tmp
-        export GITHUB_JOB=run-benchmark
+        export GITHUB_JOB=custom
         export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
         ./orioledb/ci/prerequisites.sh
         ./orioledb/ci/build.sh
@@ -111,8 +111,8 @@ do
 	export PATH=$GITHUB_WORKSPACE/pgsql/bin:$PATH
 	echo $PATH
 
-	ENGINE=orioledb PATCH_ID=$var ./test-tpcc.sh
-	ENGINE=orioledb PATCH_ID=$var ./tests-pgbench.sh
+#	ENGINE=orioledb PATCH_ID=$var ./test-tpcc.sh
+#	ENGINE=orioledb PATCH_ID=$var ./tests-pgbench.sh
 	ENGINE=orioledb PATCH_ID=$var ./test-ibench.sh
 done
 
@@ -121,8 +121,8 @@ if [ -n "$PG_ID" ]; then
 	do
 	export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
 	export PATH=$GITHUB_WORKSPACE/psql/bin:$PATH
-	ENGINE=heap PATCH_ID=$var ./test-tpcc.sh
-	ENGINE=heap PATCH_ID=$var ./tests-pgbench.sh
+#	ENGINE=heap PATCH_ID=$var ./test-tpcc.sh
+#	ENGINE=heap PATCH_ID=$var ./tests-pgbench.sh
 	ENGINE=heap PATCH_ID=$var ./test-ibench.sh
 	done
 fi
