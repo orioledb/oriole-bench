@@ -6,54 +6,70 @@
 # $FAST_RUN - run fast for testing, not for actual measurements
 
 # ---- BUILD PHASE ----
-rm -Rf ./orioledb
-rm -Rf ./postgresql
-rm -Rf ./pgbin
-git clone https://github.com/orioledb/orioledb
-git clone https://github.com/orioledb/postgres postgresql
-
 if [ -z "$ORIOLE_ID" ]; then
 	echo "Specify at least one orioledb state in ORIOLE_ID"
 	exit 1
 fi
+set -x
+rm -Rf ./orioledb
+rm -Rf ./postgres-oriole
+rm -Rf ./postgres-master
+rm -Rf ./pgbin
+git clone https://github.com/orioledb/orioledb
+git clone https://github.com/orioledb/postgres postgres-oriole
+git clone https://github.com/postgres/postgres.git postgres-master
+chmod +x ./orioledb/ci/prerequisites.sh
+export COMPILER=clang
+export LLVM_VER=17
+export CC=$COMPILER-$LLVM_VER
+export CHECK_TYPE=normal
+export GITHUB_ENV=tmp
+#export GITHUB_JOB=custom
+./orioledb/ci/prerequisites.sh
+
 
 for var in $ORIOLE_ID
 do
-        cd orioledb
+        export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
+
+	cd orioledb
         git checkout $var
 	PATCHSET=`cat .pgtags | grep 17 | cut -d' ' -f2-`
         echo "checkout patchset: $PATCHSET"
-	cd ../postgresql
+	cd ../postgres-oriole
 	git checkout $PATCHSET
-        cd ..
 
-        chmod +x ./orioledb/ci/prerequisites.sh
-        export COMPILER=clang
-        export LLVM_VER=17
-        export CHECK_TYPE=normal
-        export GITHUB_ENV=tmp
-        export GITHUB_JOB=custom
-        export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
-        ./orioledb/ci/prerequisites.sh
-        ./orioledb/ci/build.sh
-	cd orioledb
-	make USE_PGXS=1 -sj `nproc` clean
+       	OLDPATH=$PATH
+	export PATH=$GITHUB_WORKSPACE/bin:$PATH
+	./configure --disable-debug --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE CFLAGS="-O3"
+	make -j `nproc` -s
+	make -j `nproc` -s install
+	make -C contrib -j `nproc` -s
+	make -C contrib -j `nproc` -s install
+        cd ../orioledb
+	make -j `nproc` USE_PGXS=1 IS_DEV=1
+	make -j `nproc` USE_PGXS=1 IS_DEV=1 install
+	make -j `nproc` USE_PGXS=1 IS_DEV=1 clean
 	cd ..
+	export PATH=$OLDPATH
 done
 
 if [ -n "$PG_ID" ]; then
 	for var in $PG_ID
 	do
-		export GITHUB_WORKSPACE="$(pwd)/pgbin/$var/psql"
-		cd postgresql
+		export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
+		OLDPATH=$PATH
+		export PATH=$GITHUB_WORKSPACE/bin:$PATH
+		cd postgres-master
 		echo "checkout: $PG_ID"
 		git checkout $PG_ID
-		./configure --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE
-		make -sj `nproc`
-		make -sj `nproc` install
-		make -C contrib -sj `nproc`
-		make -C contrib -sj `nproc` install
+		./configure --disable-debug --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE CFLAGS="-O3"
+		make -j `nproc` -s
+		make -j `nproc` -s  install
+		make -C contrib -j `nproc` -s
+		make -C contrib -j `nproc` -s install
 		cd ..
+		export PATH=$OLDPATH
 	done
 fi
 
@@ -107,7 +123,6 @@ sudo chmod 0777 /ssd
 export PGDATADIR=/ssd/pgdata
 
 # ---- TEST PHASE ----
-OLDPATH=$PATH
 
 if [ -n "$FAST_RUN" ]; then
 	echo "FAST RUN $FAST_RUN"
@@ -116,24 +131,27 @@ fi
 for var in $ORIOLE_ID
 do
 	export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
-	export PATH=$GITHUB_WORKSPACE/pgsql/bin:$PATH
+	OLDPATH=$PATH
+	export PATH=$GITHUB_WORKSPACE/bin:$PATH
 	echo $PATH
 
-#	ENGINE=orioledb PATCH_ID=$var ./test-tpcc.sh
-#	ENGINE=orioledb PATCH_ID=$var ./tests-pgbench.sh
+	ENGINE=orioledb PATCH_ID=$var ./test-tpcc.sh
+	ENGINE=orioledb PATCH_ID=$var ./tests-pgbench.sh
 	ENGINE=orioledb PATCH_ID=$var ./test-ibench.sh
+	export PATH=$OLDPATH
 done
 
 if [ -n "$PG_ID" ]; then
 	for var in $PG_ID
 	do
 	export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
-	export PATH=$GITHUB_WORKSPACE/psql/bin:$PATH
-#	ENGINE=heap PATCH_ID=$var ./test-tpcc.sh
-#	ENGINE=heap PATCH_ID=$var ./tests-pgbench.sh
+	OLDPATH=$PATH
+	export PATH=$GITHUB_WORKSPACE/bin:$PATH
+	ENGINE=heap PATCH_ID=$var ./test-tpcc.sh
+	ENGINE=heap PATCH_ID=$var ./tests-pgbench.sh
 	ENGINE=heap PATCH_ID=$var ./test-ibench.sh
+	export PATH=$OLDPATH
 	done
 fi
 
-export PATH=$OLDPATH
 echo "Oriole-bench tests finished"

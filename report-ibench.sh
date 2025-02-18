@@ -7,7 +7,7 @@
 
 # Output: test-name, pgdata apparent size, pgdata size, pg_wal apparent size, pg_wal size, orioledb_data apparent size, orioledb_data size, orioledb_undo apparent size, orioledb_undo size, test time (sec, including checkpoint), checkpoint only time (sec)
 # 
-RESULTFILE="results/$ENGINE-$PATCH_ID-ibench-scale$SCALE_MUL-du"
+RESULTFILE="results/$ENGINE-$PATCH_ID-ibench-scale$SCALE_MUL"
 psql -dpostgres -c "checkpoint;"
 
 echo $1 | tr '\n' ',' >> $RESULTFILE

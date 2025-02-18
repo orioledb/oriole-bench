@@ -42,7 +42,7 @@ else
 	export SCALE_MUL=100
 fi
 
-RESULTFILE="results/$ENGINE-$PATCH_ID-ibench-scale$SCALE_MUL-du"
+RESULTFILE="results/$ENGINE-$PATCH_ID-ibench-scale$SCALE_MUL"
 
 echo "# $FAST_RUN_MSG" `date` >> $RESULTFILE
 echo "# pgdata apparent, pgdata, pg_wal apparent, pg_wal, orioledb_data apparent, orioledb_data, orioledb_undo apparent, orioledb_undo, time, checkpoint time" >> $RESULTFILE
