@@ -121,6 +121,8 @@ fi
 
 sudo chmod 0777 /ssd
 export PGDATADIR=/ssd/pgdata
+sudo mkdir ./results
+sudo chmod 0777 ./results
 
 # ---- TEST PHASE ----
 

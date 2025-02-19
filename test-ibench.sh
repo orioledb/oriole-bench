@@ -9,7 +9,7 @@ export IBENCH=./mdcallag-tools/bench/ibench/iibench.py
 echo TESTING PATCH $PATCH_ID
 
 # Check correct path to PG build
-if [ `which pg_ctl` == "/usr/local/pgsql/bin/pg_ctl" ]; then
+if [ `which pg_ctl` = "/usr/local/pgsql/bin/pg_ctl" ]; then
        echo "USING DEFAULT PG BINARIES. CHECK THAT bin DIRECTORY OF YOUR PATCHSET IS SET ON A FIRST POSITION IN PATH"
        exit 1
 fi
