@@ -45,6 +45,16 @@ This is compatible with volumes layout of c7gd instances. Don't run on EBS-only 
 
 This will perform all tests with default options on the current ```master``` branch of PG and on three states of OrioleDB: branch ```main```, tag ```beta9```, commit ```f55152254```.
 
+## Limitations
+
+### Tpc-c test
+
+With default options ```pgdata``` will need around 80Gb
+
+### Ibench test
+
+With default options ```pgdata``` will need around 200Gb. Each test for Orioledb takes 4-5 hours, for PG 15 hours
+
 ## Caveats
 
 - Benchmarks parameters are chosen for quite heavy instances like c7g. For running on smaller machines PG config parameters and test scales may need to be modified. 
