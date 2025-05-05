@@ -12,12 +12,18 @@ init_cluster () {
         initdb $PGDATADIR --no-locale
         pg_ctl -D $PGDATADIR -l logfile start
 
+        if [ -z "$MEMORY_BUFFERS" ]; then
+		MEMORY_BUFFERS='20GB'
+        fi
+
         cp postgresql.auto.conf.tpcc $PGDATADIR/postgresql.auto.conf
 	if [ $ENGINE = "orioledb" ]; then
         	psql -dpostgres -c "create extension orioledb;"
         	cat postgresql.auto.conf.orioledb.tpcc >> $PGDATADIR/postgresql.auto.conf
+		echo orioledb.main_buffers \= $MEMORY_BUFFERS >> $PGDATADIR/postgresql.auto.conf
 	elif [ $ENGINE = "heap" ]; then
         	cat postgresql.auto.conf.heap.tpcc >> $PGDATADIR/postgresql.auto.conf
+		echo shared_buffers \= $MEMORY_BUFFERS >> $PGDATADIR/postgresql.auto.conf
 	else
         	echo "Unknown engne: $ENGINE"
         	exit 1	
@@ -41,10 +47,14 @@ if [ `which pg_ctl` = "/usr/local/pgsql/bin/pg_ctl" ]; then
         exit 1
 fi
 
-if [ -n "$LINEAR_SCALE" ]; then
-        conns=(330 320 310 300 290 280 270 260 250 240 230 220 210 200 190 180 170 160 150 140 130 120 110 100 90 80 70 60 50 40 30 20 10 1)
+if [ -n "$TPCC_CONNS"]; then
+    conns=($TPCC_CONNS)
 else
+    if [ -n "$LINEAR_SCALE" ]; then
+        conns=(330 320 310 300 290 280 270 260 250 240 230 220 210 200 190 180 170 160 150 140 130 120 110 100 90 80 70 60 50 40 30 20 10 1)
+    else
         conns=(330 220 150 100 68 47 33 22 15 10 7 5 3 2 1)
+    fi
 fi
 
 if [ -n "$WAREHOUSES" ]; then

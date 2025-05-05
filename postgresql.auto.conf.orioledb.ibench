@@ -1,7 +1,6 @@
 shared_preload_libraries = 'orioledb.so'
 orioledb.use_sparse_files = on
 shared_buffers = 128MB
-orioledb.main_buffers = 70GB
 orioledb.catalog_buffers = 64MB
 orioledb.undo_buffers = 4GB
 orioledb.recovery_queue_size = 64MB

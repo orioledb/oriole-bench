@@ -21,12 +21,18 @@ rm -Rf /ssd/pgdata
 initdb $PGDATADIR --no-locale
 pg_ctl -D $PGDATADIR -l logfile start
 
+if [ -z "$MEMORY_BUFFERS" ]; then
+	MEMORY_BUFFERS='20GB'
+fi
+
 cp postgresql.auto.conf.pgbench $PGDATADIR/postgresql.auto.conf
 if [ $ENGINE = "orioledb" ]; then
         psql -dpostgres -c "create extension orioledb;"
         cat postgresql.auto.conf.orioledb.pgbench >> $PGDATADIR/postgresql.auto.conf
+		echo orioledb.main_buffers \= $MEMORY_BUFFERS >> $PGDATADIR/postgresql.auto.conf
 elif [ $ENGINE = "heap" ]; then
         cat postgresql.auto.conf.heap.pgbench >> $PGDATADIR/postgresql.auto.conf
+		echo shared_buffers \= $MEMORY_BUFFERS >> $PGDATADIR/postgresql.auto.conf
 else
         echo "Unknown engne: $ENGINE"
         exit 1
@@ -37,10 +43,14 @@ pg_ctl -D $PGDATADIR -l logfile restart
 pgbench postgres -i -s100
 psql -dpostgres -f ./orioledb-prepare-function.sql
 
-if [ -n "$PRECISE_PGBENCH" ]; then
-	conns=(5 6 7 8 9 10 11 12 13 15 16 18 20 22 24 27 30 33 36 39 43 47 51 56 62 68 75 82 91 100 110 120 130 150 160 180 200 220 240 270 300 330 360 390 430 470)
+if [ -n "$PGBENCH_CONNS" ]; then
+    conns=($PGBENCH_CONNS)
 else
-	conns=(10 15 22 33 47 68 100 150 220 330 470)
+    if [ -n "$PRECISE_PGBENCH" ]; then
+    	conns=(5 6 7 8 9 10 11 12 13 15 16 18 20 22 24 27 30 33 36 39 43 47 51 56 62 68 75 82 91 100 110 120 130 150 160 180 200 220 240 270 300 330 360 390 430 470)
+    else
+    	conns=(10 15 22 33 47 68 100 150 220 330 470)
+    fi
 fi
 
 if [ -n "$FAST_RUN" ]; then
@@ -54,7 +64,7 @@ fi
 echo "# $FAST_RUN_MSG " `date` >> $RESULTFILE
 echo "# conns, tps" >> $RESULTFILE
 
-if [ -z "$PGBENCH_TESTS_LIST" ]
+if [ -z "$PGBENCH_TESTS_LIST" ]; then
 	export PGBENCH_TEST_LIST="select, select_any, tpcb, tpcb_procedure"
 fi
 
