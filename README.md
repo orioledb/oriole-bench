@@ -8,7 +8,7 @@ Mainly fo internal usage. Use at your own risk.
 ```
 git checkout https://github.com/pashkinelfe/oriole-bench.git
 cd oriole-bench
-ORIOLE_ID="{list of orioledb commits}" < PG_ID="{list of pg commits}" > ./tests.sh 
+ORIOLE_ID="{list of orioledb commits}" PG_ID="{list of pg commits}" ./tests.sh
 ```
 
 ```{list of orioledb commits}``` - a list of oriole commit hashes, tags or branch names to be compared in tests
@@ -27,9 +27,13 @@ Each result file contains timestamp then test results. Repeated test runs append
 ```NVME=1``` Create and mount NVME volume and use it as ```pgdata``` destination for tests. 
 This is compatible with volumes layout of c7gd instances. Don't run on EBS-only instances.
 
+```TESTS_LIST="{list of tests to run}"``` (optional) list of test suites to run from ```tpcc```, ```pgbench```, ```ibench```. When not specified all will run.
+
 ### Pgbench-based tests
 
 ```PRECISE_PGBENCH=1``` - Gather more points for smooth and beautiful connections plot. Takes more time
+
+```PGBENCH_TESTS_LIST="{list of pgbench tests to run}"``` (optional) list of pgbench tests to run from ```select```, ```select_any```, ```tpcb```, ```tpcb_procedure```. When not specified all tests will run.
 
 ### Tpc-c test
 

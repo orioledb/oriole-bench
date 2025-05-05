@@ -129,7 +129,11 @@ sudo chmod 0777 ./results
 if [ -n "$FAST_RUN" ]; then
 	echo "FAST RUN $FAST_RUN"
 fi
-	
+
+if [ -z "$TESTS_LIST" ]; then
+	export TESTS_LIST="tpcc pgbench ibench"
+fi
+
 for var in $ORIOLE_ID
 do
 	export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
@@ -137,9 +141,11 @@ do
 	export PATH=$GITHUB_WORKSPACE/bin:$PATH
 	echo $PATH
 
-	ENGINE=orioledb PATCH_ID=$var ./test-tpcc.sh
-	ENGINE=orioledb PATCH_ID=$var ./tests-pgbench.sh
-	ENGINE=orioledb PATCH_ID=$var ./test-ibench.sh
+	for var in $TESTS_LIST
+	do
+		ENGINE=orioledb PATCH_ID=$var ./test-$var.sh
+	done
+
 	export PATH=$OLDPATH
 done
 
@@ -149,9 +155,12 @@ if [ -n "$PG_ID" ]; then
 	export GITHUB_WORKSPACE="$(pwd)/pgbin/$var"
 	OLDPATH=$PATH
 	export PATH=$GITHUB_WORKSPACE/bin:$PATH
-	ENGINE=heap PATCH_ID=$var ./test-tpcc.sh
-	ENGINE=heap PATCH_ID=$var ./tests-pgbench.sh
-	ENGINE=heap PATCH_ID=$var ./test-ibench.sh
+
+	for var in $TESTS_LIST
+	do
+		ENGINE=heap PATCH_ID=$var ./test-$var.sh
+	done
+
 	export PATH=$OLDPATH
 	done
 fi
