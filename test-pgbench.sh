@@ -1,3 +1,4 @@
+#!/bin/bash
 # Run pgbench tests
 # Input parameters
 # $PATCH_ID - commit hash
@@ -64,12 +65,16 @@ fi
 echo "# $FAST_RUN_MSG " `date` >> $RESULTFILE
 echo "# conns, tps" >> $RESULTFILE
 
-if [ -z "$PGBENCH_TESTS_LIST" ]; then
-	export PGBENCH_TEST_LIST="select, select_any, tpcb, tpcb_procedure"
-fi
+#if [ -z "$PGBENCH_TESTS_LIST" ]; then
+export PGBENCH_TESTS_LIST="select select_any9 select_any30 tpcb tpcb_procedure"
+#fi
+
+echo Run pgbench tests: conns $conns test list $PGBENCH_TEST_LIST
 
 for t in $PGBENCH_TESTS_LIST
 do
+	echo Run pgbench test $t
+
 	if [ $t = "select" ]; then
 		echo "# Random select test" >> $RESULTFILE
 		for a in "${conns[@]}"
@@ -80,7 +85,7 @@ do
 			pgbench postgres -S -M prepared -T $RUN_TIME -j 5 -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
 		done
 
-	elif [ $t = "select_any" ]; then
+	elif [ $t = "select_any9" ]; then
 		echo "# Select any random 9 test" >> $RESULTFILE
 		for a in "${conns[@]}"
 		do
@@ -88,6 +93,16 @@ do
 			echo $a | tr '\n' ',' >> $RESULTFILE
 			psql -dpostgres -c "checkpoint;"
 			pgbench postgres -f ./orioledb-select-9.sql -s100 -M prepared -T $RUN_TIME -j 5 -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
+		done
+
+	elif [ $t = "select_any30" ]; then
+		echo "# Select any random 30 test" >> $RESULTFILE
+		for a in "${conns[@]}"
+		do
+			echo "select 30 conns: $a"
+			echo $a | tr '\n' ',' >> $RESULTFILE
+			psql -dpostgres -c "checkpoint;"
+			pgbench postgres -f ./orioledb-select-30.sql -s100 -M prepared -T $RUN_TIME -j 5 -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
 		done
 
 	elif [ $t = "tpcb_procedure" ]; then
@@ -115,6 +130,5 @@ do
 		exit 1
 
 	fi
-
 done
 pg_ctl -D $PGDATADIR -l logfile stop

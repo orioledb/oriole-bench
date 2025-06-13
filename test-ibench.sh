@@ -1,3 +1,4 @@
+#!/bin/bash
 # Run ibench tests
 # Input parameters
 # $PATCH_ID - commit hash

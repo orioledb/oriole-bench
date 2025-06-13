@@ -1,3 +1,4 @@
+#!/bin/bash
 # Input variables
 # $LINEAR_SCALE - linear scale, beautiful for publishing but slower
 # $INIT_POINT - init cluster before each point (better test repeatability but much slower)
@@ -47,7 +48,7 @@ if [ `which pg_ctl` = "/usr/local/pgsql/bin/pg_ctl" ]; then
         exit 1
 fi
 
-if [ -n "$TPCC_CONNS"]; then
+if [ -n "$TPCC_CONNS" ]; then
     conns=($TPCC_CONNS)
 else
     if [ -n "$LINEAR_SCALE" ]; then
@@ -88,7 +89,8 @@ do
         for a in "${conns[@]}"
         do
                 if [ -n "$INIT_POINT" ]; then
-                        init_cluster $w
+			echo "Init cluster $w"
+                        init_cluster $w, $a
                 fi
 
                 echo "$w,$a," | tr -d '\n' >> $RESULTFILE

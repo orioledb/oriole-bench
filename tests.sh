@@ -1,3 +1,4 @@
+#!/bin/bash
 # Do all benchmarks for specified version of PG and Orioledb
 # 
 # Input:
@@ -39,13 +40,15 @@ do
 	cd ../postgres-oriole
 	git checkout $PATCHSET
 
-       	OLDPATH=$PATH
+	OLDPATH=$PATH
 	export PATH=$GITHUB_WORKSPACE/bin:$PATH
 	./configure --disable-debug --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE CFLAGS="-O3"
 	make -j `nproc` -s
 	make -j `nproc` -s install
-	make -C contrib -j `nproc` -s
-	make -C contrib -j `nproc` -s install
+	make -C src/bin/pgbench -j `nproc` -s
+	make -C src/bin/pgbench -j `nproc` -s install
+#	make -C contrib -j `nproc` -s
+#	make -C contrib -j `nproc` -s install
         cd ../orioledb
 	make -j `nproc` USE_PGXS=1 IS_DEV=1
 	make -j `nproc` USE_PGXS=1 IS_DEV=1 install
@@ -74,12 +77,12 @@ if [ -n "$PG_ID" ]; then
 fi
 
 # ---- PREPARE TESTS PHASE
-rm -Rf ./mdcallag-tools
+#rm -Rf ./mdcallag-tools
 rm -Rf ./go-tpc
 
 pip3 install psycopg2 six testgres
-git clone https://github.com/pashkinelfe/mdcallag-tools.git mdcallag-tools
-export IBENCHDIR=/mdcallag-tools/bench/ibench
+#git clone https://github.com/pashkinelfe/mdcallag-tools.git mdcallag-tools
+#export IBENCHDIR=/mdcallag-tools/bench/ibench
 
 GO_VERSION="1.21.1"
 wget https://dl.google.com/go/go${GO_VERSION}.linux-arm64.tar.gz
@@ -106,13 +109,13 @@ if [ -n "$NVME" ]; then
 	echo "Mounting NVME volume"
 #       hardcoded for c7gd instance
 	NVME_VOL=`sudo parted -l -m | grep -m 1 "Amazon EC2 NVMe Instance Storage" | cut -f1 -d ':'`
-	if [-z $NVME_VOL]; then
+	if [ -z "$NVME_VOL" ]; then
 		echo "NVME volume $NVME_VOL not found. Try calling without NVME variable."
 		exit 1
 	fi
 
-	sudo parted $NVME_VOL mklabel gpt
-	sudo parted $NVME_VOL mkpart ext4 0% 100%
+	sudo parted $NVME_VOL mklabel gpt -s
+	sudo parted $NVME_VOL mkpart ext4 0% 100% -s
 	sudo mkfs.ext4 "$NVME_VOL"p1
 	sudo mount -t ext4 -o defaults,nocheck "$NVME_VOL"p1 /ssd
 	sudo chmod 0777 /ssd
@@ -131,7 +134,7 @@ if [ -n "$FAST_RUN" ]; then
 fi
 
 if [ -z "$TESTS_LIST" ]; then
-	export TESTS_LIST="tpcc pgbench ibench"
+	export TESTS_LIST="pgbench tpcc ibench"
 fi
 
 for var in $ORIOLE_ID
@@ -141,9 +144,10 @@ do
 	export PATH=$GITHUB_WORKSPACE/bin:$PATH
 	echo $PATH
 
-	for var in $TESTS_LIST
+	for tst in $TESTS_LIST
 	do
-		ENGINE=orioledb PATCH_ID=$var ./test-$var.sh
+		echo "RUN test Orioledb $var test-$tst.sh"
+		ENGINE=orioledb PATCH_ID=$var ./test-$tst.sh
 	done
 
 	export PATH=$OLDPATH
@@ -156,9 +160,9 @@ if [ -n "$PG_ID" ]; then
 	OLDPATH=$PATH
 	export PATH=$GITHUB_WORKSPACE/bin:$PATH
 
-	for var in $TESTS_LIST
+	for tst in $TESTS_LIST
 	do
-		ENGINE=heap PATCH_ID=$var ./test-$var.sh
+		ENGINE=heap PATCH_ID=$var ./test-$tst.sh
 	done
 
 	export PATH=$OLDPATH
