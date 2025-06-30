@@ -42,7 +42,7 @@ do
 
 	OLDPATH=$PATH
 	export PATH=$GITHUB_WORKSPACE/bin:$PATH
-	./configure --disable-debug --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE CFLAGS="-O3"
+	./configure --enable-debug --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE CFLAGS="-O3"
 	make -j `nproc` -s
 	make -j `nproc` -s install
 	make -C src/bin/pgbench -j `nproc` -s
@@ -66,7 +66,7 @@ if [ -n "$PG_ID" ]; then
 		cd postgres-master
 		echo "checkout: $PG_ID"
 		git checkout $PG_ID
-		./configure --disable-debug --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE CFLAGS="-O3"
+		./configure --enable-debug --disable-cassert --enable-tap-tests --with-icu --prefix=$GITHUB_WORKSPACE CFLAGS="-O3"
 		make -j `nproc` -s
 		make -j `nproc` -s  install
 		make -C contrib -j `nproc` -s
