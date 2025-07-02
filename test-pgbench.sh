@@ -23,7 +23,7 @@ initdb $PGDATADIR --no-locale
 pg_ctl -D $PGDATADIR -l logfile start
 
 if [ -z "$MEMORY_BUFFERS" ]; then
-	MEMORY_BUFFERS='20GB'
+	MEMORY_BUFFERS='32GB'
 fi
 
 cp postgresql.auto.conf.pgbench $PGDATADIR/postgresql.auto.conf
@@ -41,7 +41,7 @@ fi
 
 pg_ctl -D $PGDATADIR -l logfile restart
 
-pgbench postgres -i -s100
+pgbench postgres -i -s1000
 psql -dpostgres -f ./orioledb-prepare-function.sql
 
 if [ -n "$PGBENCH_CONNS" ]; then
@@ -66,7 +66,7 @@ echo "# $FAST_RUN_MSG " `date` >> $RESULTFILE
 echo "# conns, tps" >> $RESULTFILE
 
 #if [ -z "$PGBENCH_TESTS_LIST" ]; then
-export PGBENCH_TESTS_LIST="select select_any9 select_any30 tpcb tpcb_procedure"
+export PGBENCH_TESTS_LIST="select select_any9 select_any30 select_any50 tpcb tpcb_procedure"
 #fi
 
 echo Run pgbench tests: conns $conns test list $PGBENCH_TEST_LIST
@@ -82,7 +82,7 @@ do
 			echo "read only test conns: $a"
 			echo $a | tr '\n' ',' >> $RESULTFILE
 			psql -dpostgres -c "checkpoint;"
-			pgbench postgres -S -M prepared -T $RUN_TIME -j 5 -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
+			pgbench postgres -S -s1000 -M prepared -T $RUN_TIME -j $a -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
 		done
 
 	elif [ $t = "select_any9" ]; then
@@ -92,7 +92,7 @@ do
 			echo "select 9 conns: $a"
 			echo $a | tr '\n' ',' >> $RESULTFILE
 			psql -dpostgres -c "checkpoint;"
-			pgbench postgres -f ./orioledb-select-9.sql -s100 -M prepared -T $RUN_TIME -j 5 -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
+			pgbench postgres -f ./orioledb-select-9.sql -s1000 -M prepared -T $RUN_TIME -j $a -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
 		done
 
 	elif [ $t = "select_any30" ]; then
@@ -102,7 +102,17 @@ do
 			echo "select 30 conns: $a"
 			echo $a | tr '\n' ',' >> $RESULTFILE
 			psql -dpostgres -c "checkpoint;"
-			pgbench postgres -f ./orioledb-select-30.sql -s100 -M prepared -T $RUN_TIME -j 5 -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
+			pgbench postgres -f ./orioledb-select-30.sql -s1000 -M prepared -T $RUN_TIME -j $a -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
+		done
+
+	elif [ $t = "select_any50" ]; then
+		echo "# Select any random 50 test" >> $RESULTFILE
+		for a in "${conns[@]}"
+		do
+			echo "select 50 conns: $a"
+			echo $a | tr '\n' ',' >> $RESULTFILE
+			psql -dpostgres -c "checkpoint;"
+			pgbench postgres -f ./orioledb-select-50.sql -s1000 -M prepared -T $RUN_TIME -j $a -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
 		done
 
 	elif [ $t = "tpcb_procedure" ]; then
@@ -112,7 +122,7 @@ do
 			echo "tpcb procedure conns: $a"
 			echo $a | tr '\n' ',' >> $RESULTFILE
 			psql -dpostgres -c "checkpoint;"
-			pgbench postgres -f ./orioledb-tpcb-in-procedure.sql -s100 -M prepared -T $RUN_TIME -j 5 -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
+			pgbench postgres -f ./orioledb-tpcb-in-procedure.sql -s1000 -M prepared -T $RUN_TIME -j $a -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
 		done
 
 	elif [ $t = "tpcb" ]; then
@@ -122,7 +132,7 @@ do
 			echo "TPC-b conns: $a"
 			echo $a | tr '\n' ',' >> $RESULTFILE
 			psql -dpostgres -c "checkpoint;"
-			pgbench postgres -M prepared -T $RUN_TIME -j 5 -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
+			pgbench postgres -M prepared -s1000 -T $RUN_TIME -j $a -c $a | grep "tps = " | grep "(without initial connection time)" | cut -d " " -f3 | cut -d "." -f1 >> $RESULTFILE
 		done
 
 	else
