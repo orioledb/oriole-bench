@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""
+Run pgbench tests. Replaces test-pgbench.sh.
+
+The PGDATA directory is named after the test+scale, so multiple data dirs can
+coexist under --pgdata-base and `--reuse-data` reuses a populated one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import sys
+from pathlib import Path
+
+import common
+from common import (
+    BenchError,
+    Preflight,
+    ResourceMonitor,
+    add_common_test_args,
+    append_line,
+    append_text,
+    assert_pg_build_in_path,
+    data_dir_for,
+    ensure_dir,
+    is_pgdata_initialized,
+    log,
+    now_str,
+    parse_pgbench_tps,
+    pg_initdb,
+    pg_psql,
+    pg_psql_file,
+    pg_restart,
+    pg_start,
+    positive_int,
+    remove_dir,
+    run,
+    script_dir,
+    stop_pg_silent,
+    write_engine_config,
+)
+
+
+# Pgbench scale is fixed to 1000 (matches the original bash).
+pgbench_scale = 1000
+
+precise_conns = [
+    5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 18, 20, 22, 24, 27, 30, 33, 36, 39,
+    43, 47, 51, 56, 62, 68, 75, 82, 91, 100, 110, 120, 130, 150, 160, 180,
+    200, 220, 240, 270, 300, 330, 360, 390, 430, 470,
+]
+coarse_conns = [10, 15, 22, 33, 47, 68, 100, 150, 220, 330, 470]
+
+default_subtests = [
+    "select", "select_any9", "select_any30", "select_any50",
+    "tpcb", "tpcb_procedure",
+]
+
+subtest_headers = {
+    "select":           "# Random select test",
+    "select_any9":      "# Select any random 9 test",
+    "select_any30":     "# Select any random 30 test",
+    "select_any50":     "# Select any random 50 test",
+    "tpcb":             "# tpc-b test",
+    "tpcb_procedure":   "# tpc-b in procedure test",
+}
+
+subtest_files = {
+    "select_any9":   "orioledb-select-9.sql",
+    "select_any30":  "orioledb-select-30.sql",
+    "select_any50":  "orioledb-select-50.sql",
+    "tpcb_procedure": "orioledb-tpcb-in-procedure.sql",
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Run pgbench tests for one (engine, patch_id) point.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    add_common_test_args(p)
+    p.add_argument("--precise", action="store_true",
+                   help="Use the dense connection list (overridden by --conns).")
+    p.add_argument("--conns", nargs="+", type=positive_int, metavar="N",
+                   help="Explicit list of connection counts (overrides --precise).")
+    p.add_argument("--subtests", nargs="+", choices=default_subtests, metavar="TEST",
+                   default=default_subtests,
+                   help="Subtests to run (default: all).")
+    return p
+
+
+def preflight(args: argparse.Namespace) -> None:
+    pf = Preflight()
+    pf.assert_engine(args.engine)
+    for b in ("pg_ctl", "initdb", "psql", "pgbench"):
+        pf.require_binary(b)
+    for f in common.conf_files_required_for_tests["pgbench"]:
+        pf.require_file(script_dir / f)
+    for t in args.subtests:
+        sql = subtest_files.get(t)
+        if sql:
+            pf.require_file(script_dir / sql)
+    pf.finish()
+    assert_pg_build_in_path()
+
+
+def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
+                    reuse_data: bool) -> bool:
+    """
+    Initialize (or reuse) and start the PG cluster. Returns True if data needs
+    to be (re)loaded with `pgbench -i`.
+    """
+    stop_pg_silent(pgdatadir)
+    if reuse_data and is_pgdata_initialized(pgdatadir):
+        log.info("Reusing existing PGDATA at %s", pgdatadir)
+        # Refresh engine config in case --memory-buffers changed.
+        ensure_dir(pgdatadir)
+        write_engine_config(pgdatadir, engine, "pgbench", memory_buffers)
+        pg_start(pgdatadir)
+        pg_restart(pgdatadir)
+        return False
+
+    log.info("Initializing fresh PGDATA at %s for engine=%s", pgdatadir, engine)
+    remove_dir(pgdatadir)
+    ensure_dir(pgdatadir.parent)
+    pg_initdb(pgdatadir)
+    pg_start(pgdatadir)
+    write_engine_config(pgdatadir, engine, "pgbench", memory_buffers)
+    if engine == "orioledb":
+        pg_psql("create extension orioledb;")
+    pg_restart(pgdatadir)
+    return True
+
+
+def run_pgbench_session(*, extra_args: list[str], conns: int, run_time: int,
+                        monitor_path: Path | None,
+                        mount_point: Path) -> int | None:
+    cmd = [
+        "pgbench", "postgres",
+        *extra_args,
+        f"-s{pgbench_scale}", "-M", "prepared",
+        "-T", str(run_time),
+        "-j", str(conns),
+        "-c", str(conns),
+    ]
+    cm = (
+        ResourceMonitor(monitor_path, mount_point=mount_point)
+        if monitor_path is not None else contextlib.nullcontext()
+    )
+    with cm:
+        proc = run(cmd, capture=True)
+    return parse_pgbench_tps(proc.stdout or "")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    preflight(args)
+
+    log.info("TESTING PATCH %s", args.patch_id)
+
+    memory_buffers = args.memory_buffers or "32GB"
+    if args.conns:
+        conns_list = list(args.conns)
+    elif args.precise:
+        conns_list = list(precise_conns)
+    else:
+        conns_list = list(coarse_conns)
+
+    run_time = 5 if args.fast_run else 30
+    fast_msg = "FAST RUN!" if args.fast_run else ""
+
+    pgdatadir = data_dir_for(args.pgdata_base, engine=args.engine,
+                             test="pgbench", scale=f"s{pgbench_scale}")
+    needs_load = prepare_cluster(pgdatadir, args.engine, memory_buffers,
+                                 args.reuse_data)
+    if needs_load:
+        run(["pgbench", "postgres", "-i", f"-s{pgbench_scale}"])
+        pg_psql_file(script_dir / "orioledb-prepare-function.sql")
+
+    ensure_dir(args.results_dir)
+    result_file = args.results_dir / f"{args.engine}-{args.patch_id}-pgbench"
+    monitor_dir = args.results_dir / f"{args.engine}-{args.patch_id}-pgbench-resources"
+    if args.extended_logging:
+        ensure_dir(monitor_dir)
+
+    append_line(result_file, f"# {fast_msg} {now_str()}")
+    append_line(result_file, "# conns, tps")
+
+    log.info("Run pgbench tests: conns=%s tests=%s extended=%s",
+             conns_list, args.subtests, args.extended_logging)
+
+    for t in args.subtests:
+        log.info("Run pgbench test %s", t)
+        append_line(result_file, subtest_headers[t])
+
+        if t == "select":
+            extra: list[str] = ["-S"]
+        elif t == "tpcb":
+            extra = []
+        else:
+            extra = ["-f", str(script_dir / subtest_files[t])]
+
+        for c in conns_list:
+            log.info("%s conns: %d", t, c)
+            append_text(result_file, f"{c},")
+            pg_psql("checkpoint;")
+            monitor_path = (
+                monitor_dir / f"{t}-c{c}.jsonl"
+                if args.extended_logging else None
+            )
+            tps = run_pgbench_session(
+                extra_args=extra, conns=c, run_time=run_time,
+                monitor_path=monitor_path, mount_point=pgdatadir,
+            )
+            if tps is None:
+                log.warning("pgbench did not produce tps line for conns=%d test=%s", c, t)
+                append_line(result_file, "ERROR")
+            else:
+                append_line(result_file, str(tps))
+
+    stop_pg_silent(pgdatadir)
+    log.info("pgbench tests finished")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except BenchError as e:
+        log.error("Bench error: %s", e)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        log.error("Interrupted by user")
+        sys.exit(130)
