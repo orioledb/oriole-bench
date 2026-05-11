@@ -209,7 +209,6 @@ def ensure_orioledb_prerequisites(args: argparse.Namespace) -> None:
     prereq = script_dir / "orioledb" / "ci" / "prerequisites.sh"
     if not prereq.is_file():
         raise BenchError(f"orioledb prerequisites script missing: {prereq}")
-    prereq.chmod(0o755)
     env = {
         "COMPILER": "clang",
         "LLVM_VER": "17",
@@ -217,7 +216,9 @@ def ensure_orioledb_prerequisites(args: argparse.Namespace) -> None:
         "CHECK_TYPE": "normal",
         "GITHUB_ENV": "tmp",
     }
-    run([str(prereq)], cwd=script_dir, env=env)
+    # Invoke via `bash` so we don't have to chmod +x the upstream file
+    # (which would otherwise be seen as a dirty working-tree change).
+    run(["bash", str(prereq)], cwd=script_dir, env=env)
 
 
 def read_pg_patchset_for_oriole(orioledb_dir: Path) -> str:

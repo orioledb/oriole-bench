@@ -509,6 +509,10 @@ def repo_clone_or_fetch(repo_url: str, dest: Path) -> None:
     """
     If dest exists and is a git repo, fetch all refs. Otherwise, clone.
     Caller is responsible for git-checkout-ing the desired ref afterwards.
+
+    Sets core.fileMode=false on the local clone so executable-bit changes
+    (e.g. chmod +x ci/prerequisites.sh) are not seen as dirty working-tree
+    changes that would block subsequent `git checkout <ref>`.
     """
     if is_git_repo(dest):
         log.info("Reusing existing git checkout: %s", dest)
@@ -517,6 +521,7 @@ def repo_clone_or_fetch(repo_url: str, dest: Path) -> None:
         if dest.exists():
             raise BenchError(f"Path exists but is not a git repo: {dest}")
         run(["git", "clone", repo_url, str(dest)], cwd=dest.parent)
+    run(["git", "config", "core.fileMode", "false"], cwd=dest)
 
 
 def pg_build_exists(prefix: Path) -> bool:
