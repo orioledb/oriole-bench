@@ -871,12 +871,10 @@ class ResourceMonitor:
     def __enter__(self) -> "ResourceMonitor":
         try:
             import psutil  # noqa: F401
-            import psycopg2  # noqa: F401
         except ImportError as e:
             raise BenchError(
-                "Extended logging requires `psutil` and `psycopg2-binary`. "
-                "Run tests.py once (it installs them) or `pip3 install psutil "
-                "psycopg2-binary`."
+                "Extended logging requires `psutil`. "
+                "Run tests.py once (it installs deps) or `pip3 install psutil`."
             ) from e
 
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -897,17 +895,33 @@ class ResourceMonitor:
     def _sample_loop(self) -> None:
         try:
             import psutil
-            import psycopg2
         except ImportError as e:
-            self._exc = BenchError(f"ResourceMonitor missing dep: {e}")
+            self._exc = BenchError(f"ResourceMonitor missing psutil: {e}")
             return
 
+        # psycopg2 is optional. If it isn't installed, or the connection
+        # cannot be established (e.g. Postgres isn't running yet / has been
+        # stopped), we just keep sampling CPU/IO/disk and leave waits+lsn null.
         try:
-            conn = psycopg2.connect(self.dsn)
-            conn.autocommit = False
-        except Exception as e:
-            self._exc = BenchError(f"ResourceMonitor cannot connect to PG: {e}")
-            return
+            import psycopg2  # type: ignore
+        except ImportError:
+            log.warning(
+                "ResourceMonitor: psycopg2 not available; "
+                "pg wait-event sampling will be skipped."
+            )
+            psycopg2 = None  # type: ignore[assignment]
+
+        conn = None
+        if psycopg2 is not None:
+            try:
+                conn = psycopg2.connect(self.dsn)
+                conn.autocommit = False
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "ResourceMonitor: cannot connect to PG (%s); "
+                    "continuing with CPU/IO/disk sampling only.", e,
+                )
+                conn = None
 
         waits_sql = (
             "SELECT jsonb_object_agg(k, v)::text waits, "
@@ -931,28 +945,44 @@ class ResourceMonitor:
                     if self._stop_event.wait(timeout=delay):
                         break
 
-                    cpu = psutil.cpu_times()
-                    io = psutil.disk_io_counters()
+                    try:
+                        cpu = psutil.cpu_times()
+                        io = psutil.disk_io_counters()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("ResourceMonitor: psutil sample failed: %s", e)
+                        continue
+
                     try:
                         disk_used = shutil.disk_usage(self.mount_point).used
                     except OSError:
                         disk_used = None
 
                     waits, lsn = None, None
-                    try:
-                        with conn.cursor() as cur:
-                            cur.execute(waits_sql)
-                            row = cur.fetchone()
-                        conn.commit()
-                        if row is not None:
-                            waits_json, lsn = row
-                            waits = json.loads(waits_json) if waits_json else None
-                    except Exception as e:  # noqa: BLE001
+                    if conn is not None:
                         try:
-                            conn.rollback()
-                        except Exception:
-                            pass
-                        log.warning("ResourceMonitor: pg query failed: %s", e)
+                            with conn.cursor() as cur:
+                                cur.execute(waits_sql)
+                                row = cur.fetchone()
+                            conn.commit()
+                            if row is not None:
+                                waits_json, lsn = row
+                                waits = (json.loads(waits_json)
+                                         if waits_json else None)
+                        except Exception as e:  # noqa: BLE001
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                            log.warning(
+                                "ResourceMonitor: pg query failed (%s); "
+                                "disabling pg sampling for the rest of "
+                                "this run.", e,
+                            )
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                            conn = None
 
                     sample = {
                         "time": tick,
@@ -972,12 +1002,14 @@ class ResourceMonitor:
                     out_file.write(json.dumps(sample) + "\n")
                     out_file.flush()
         except Exception as e:  # noqa: BLE001
+            # File-write errors and similar are genuine — surface them.
             self._exc = BenchError(f"ResourceMonitor crashed: {e}")
         finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
