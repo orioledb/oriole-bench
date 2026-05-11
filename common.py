@@ -882,16 +882,47 @@ class ResourceMonitor:
         output_path: Path,
         *,
         mount_point: Path,
-        dsn: str = "dbname=postgres",
+        dsn: str | None = None,
+        pgdatadir: Path | None = None,
         interval: float = 1.0,
     ) -> None:
         self.output_path = Path(output_path)
         self.mount_point = Path(mount_point)
+        self.pgdatadir = Path(pgdatadir) if pgdatadir is not None else None
+        # If dsn isn't supplied, _resolve_dsn() builds one from postmaster.pid
+        # at sample-loop time (PG may not yet be running at __init__).
         self.dsn = dsn
         self.interval = interval
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._exc: BaseException | None = None
+
+    def _resolve_dsn(self) -> str:
+        """
+        Build a DSN that actually reaches the PG instance under test.
+
+        psycopg2-binary bundles its own libpq whose compiled-in default socket
+        directory differs from a source-built PG (Debian's /var/run/postgresql
+        vs Postgres' /tmp), so we have to be explicit. We prefer the socket
+        directory recorded in postmaster.pid (line 5) and fall back to TCP
+        localhost.
+        """
+        if self.dsn is not None:
+            return self.dsn
+
+        socket_dir: str | None = None
+        if self.pgdatadir is not None:
+            pidfile = self.pgdatadir / "postmaster.pid"
+            try:
+                lines = pidfile.read_text().splitlines()
+                if len(lines) >= 5 and lines[4].strip():
+                    socket_dir = lines[4].strip()
+            except OSError:
+                pass
+
+        if socket_dir:
+            return f"host={socket_dir} dbname=postgres"
+        return "host=127.0.0.1 port=5432 dbname=postgres"
 
     def __enter__(self) -> "ResourceMonitor":
         try:
@@ -938,10 +969,6 @@ class ResourceMonitor:
             )
             psycopg2 = None  # type: ignore[assignment]
 
-        connect_dsn = self.dsn
-        if "connect_timeout" not in connect_dsn:
-            connect_dsn = (connect_dsn + " connect_timeout=2").strip()
-
         retry_after = 5.0  # seconds between connect attempts
         last_connect_attempt = 0.0
         conn = None
@@ -951,8 +978,13 @@ class ResourceMonitor:
             if psycopg2 is None or conn is not None:
                 return
             last_connect_attempt = time.monotonic()
+            # Re-resolve on every attempt: PG may have just (re)started and
+            # written postmaster.pid only now.
+            dsn = self._resolve_dsn()
+            if "connect_timeout" not in dsn:
+                dsn = (dsn + " connect_timeout=2").strip()
             try:
-                conn = psycopg2.connect(connect_dsn)
+                conn = psycopg2.connect(dsn)
                 conn.autocommit = False
             except Exception:  # noqa: BLE001
                 conn = None

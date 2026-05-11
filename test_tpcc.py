@@ -109,8 +109,11 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
         if engine == "orioledb":
             pg_psql("create extension orioledb;")
         pg_restart(pgdatadir)
-        pg_psql("show shared_buffers; show orioledb.main_buffers; "
-                "show default_table_access_method;")
+        if engine == "orioledb":
+            pg_psql("show shared_buffers; show orioledb.main_buffers; "
+                    "show default_table_access_method;")
+        else:
+            pg_psql("show shared_buffers; show default_table_access_method;")
 
     with stage(f"go-tpc prepare w={warehouses}"):
         run([
@@ -127,7 +130,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
 
 def run_tpcc_measure(
     *, go_tpc: Path, warehouses: int, conns: int, measure_time: str,
-    monitor_path: Path | None, mount_point: Path,
+    monitor_path: Path | None, pgdatadir: Path,
 ) -> int | None:
     cmd = [
         str(go_tpc), "tpcc",
@@ -139,7 +142,8 @@ def run_tpcc_measure(
         "--time", measure_time,
     ]
     cm = (
-        ResourceMonitor(monitor_path, mount_point=mount_point)
+        ResourceMonitor(monitor_path, mount_point=pgdatadir,
+                        pgdatadir=pgdatadir)
         if monitor_path is not None else contextlib.nullcontext()
     )
     with cm:
@@ -201,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
                 tpm = run_tpcc_measure(
                     go_tpc=args.go_tpc, warehouses=w, conns=a,
                     measure_time=measure_time,
-                    monitor_path=monitor_path, mount_point=pgdatadir,
+                    monitor_path=monitor_path, pgdatadir=pgdatadir,
                 )
                 if tpm is None:
                     log.warning("    w=%d conns=%d: no tpmTotal in output", w, a)

@@ -223,7 +223,8 @@ def _run_phase(
 ) -> float:
     start = time.monotonic()
     monitor_cm = (
-        ResourceMonitor(monitor_path, mount_point=pgdatadir)
+        ResourceMonitor(monitor_path, mount_point=pgdatadir,
+                        pgdatadir=pgdatadir)
         if monitor_path is not None else contextlib.nullcontext()
     )
     with stage(f"ibench {p.label}"), monitor_cm:

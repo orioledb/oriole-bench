@@ -135,7 +135,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
 
 def run_pgbench_session(*, extra_args: list[str], conns: int, run_time: int,
                         monitor_path: Path | None,
-                        mount_point: Path) -> int | None:
+                        pgdatadir: Path) -> int | None:
     cmd = [
         "pgbench", "postgres",
         *extra_args,
@@ -145,7 +145,8 @@ def run_pgbench_session(*, extra_args: list[str], conns: int, run_time: int,
         "-c", str(conns),
     ]
     cm = (
-        ResourceMonitor(monitor_path, mount_point=mount_point)
+        ResourceMonitor(monitor_path, mount_point=pgdatadir,
+                        pgdatadir=pgdatadir)
         if monitor_path is not None else contextlib.nullcontext()
     )
     with cm:
@@ -207,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 tps = run_pgbench_session(
                     extra_args=extra, conns=c, run_time=run_time,
-                    monitor_path=monitor_path, mount_point=pgdatadir,
+                    monitor_path=monitor_path, pgdatadir=pgdatadir,
                 )
                 if tps is None:
                     log.warning("    conns=%d: pgbench produced no tps line", c)
