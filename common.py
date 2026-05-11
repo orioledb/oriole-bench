@@ -544,12 +544,22 @@ def positive_int(value: str) -> int:
 # Data-directory naming
 # ---------------------------------------------------------------------------
 
-def data_dir_for(base: Path, *, engine: str, test: str, scale: str | int) -> Path:
+def data_dir_for(
+    base: Path,
+    *,
+    engine: str,
+    patch_id: str,
+    test: str,
+    scale: str | int,
+) -> Path:
     """
-    A per-(engine, test, scale) data directory. The path is uniquely defined by
-    its inputs, so multiple data dirs can coexist on the same volume.
+    A per-(engine, patch_id, test, scale) data directory. Including the
+    patch_id (tag / commit hash / branch) prevents one build's data files
+    from being silently reused by an incompatible binary, and isolates
+    results between builds.
     """
-    return Path(base) / f"pgdata-{engine}-{test}-{scale}"
+    safe_patch = _sanitize_log_name(patch_id)
+    return Path(base) / f"pgdata-{engine}-{safe_patch}-{test}-{scale}"
 
 
 # ---------------------------------------------------------------------------
@@ -850,7 +860,22 @@ class ResourceMonitor:
 
     Lazy-imports psutil and psycopg2 so that scripts that don't use extended
     logging can run without these deps installed.
+
+    Soft-failure modes (missing psycopg2, PG unreachable, query failed)
+    produce a single warning per process — the per-sample data records that
+    waits/lsn are absent (null), so there's no need to spam the log.
     """
+
+    # Class-level dedup so re-entering N times in a row doesn't repeat the
+    # same warning. Sub-warnings are emitted at most once per process.
+    _warned: set[str] = set()
+
+    @classmethod
+    def _warn_once(cls, key: str, msg: str, *args: object) -> None:
+        if key in cls._warned:
+            return
+        cls._warned.add(key)
+        log.warning(msg, *args)
 
     def __init__(
         self,
@@ -899,29 +924,41 @@ class ResourceMonitor:
             self._exc = BenchError(f"ResourceMonitor missing psutil: {e}")
             return
 
-        # psycopg2 is optional. If it isn't installed, or the connection
-        # cannot be established (e.g. Postgres isn't running yet / has been
-        # stopped), we just keep sampling CPU/IO/disk and leave waits+lsn null.
+        # psycopg2 is optional. If it isn't installed, or PG isn't reachable,
+        # we keep sampling CPU/IO/disk and leave waits+lsn null. The connect
+        # is retried periodically so a monitor opened just before PG is ready
+        # picks pg sampling up once the server appears.
         try:
             import psycopg2  # type: ignore
         except ImportError:
-            log.warning(
-                "ResourceMonitor: psycopg2 not available; "
-                "pg wait-event sampling will be skipped."
+            self._warn_once(
+                "no-psycopg2",
+                "ResourceMonitor: psycopg2 not available; pg wait-event "
+                "sampling will be skipped.",
             )
             psycopg2 = None  # type: ignore[assignment]
 
+        connect_dsn = self.dsn
+        if "connect_timeout" not in connect_dsn:
+            connect_dsn = (connect_dsn + " connect_timeout=2").strip()
+
+        retry_after = 5.0  # seconds between connect attempts
+        last_connect_attempt = 0.0
         conn = None
-        if psycopg2 is not None:
+
+        def _try_connect() -> None:
+            nonlocal conn, last_connect_attempt
+            if psycopg2 is None or conn is not None:
+                return
+            last_connect_attempt = time.monotonic()
             try:
-                conn = psycopg2.connect(self.dsn)
+                conn = psycopg2.connect(connect_dsn)
                 conn.autocommit = False
-            except Exception as e:  # noqa: BLE001
-                log.warning(
-                    "ResourceMonitor: cannot connect to PG (%s); "
-                    "continuing with CPU/IO/disk sampling only.", e,
-                )
+            except Exception:  # noqa: BLE001
                 conn = None
+
+        # First attempt at startup; subsequent attempts are gated by retry_after.
+        _try_connect()
 
         waits_sql = (
             "SELECT jsonb_object_agg(k, v)::text waits, "
@@ -957,6 +994,12 @@ class ResourceMonitor:
                     except OSError:
                         disk_used = None
 
+                    # Reconnect if we lost the connection (or never had one).
+                    if (conn is None
+                            and time.monotonic() - last_connect_attempt
+                                >= retry_after):
+                        _try_connect()
+
                     waits, lsn = None, None
                     if conn is not None:
                         try:
@@ -968,21 +1011,20 @@ class ResourceMonitor:
                                 waits_json, lsn = row
                                 waits = (json.loads(waits_json)
                                          if waits_json else None)
-                        except Exception as e:  # noqa: BLE001
+                        except Exception:  # noqa: BLE001
+                            # Connection died; close it and let the retry-gate
+                            # decide when to try again. No warning — this is
+                            # routine when PG is bounced between measurements.
                             try:
                                 conn.rollback()
                             except Exception:
                                 pass
-                            log.warning(
-                                "ResourceMonitor: pg query failed (%s); "
-                                "disabling pg sampling for the rest of "
-                                "this run.", e,
-                            )
                             try:
                                 conn.close()
                             except Exception:
                                 pass
                             conn = None
+                            last_connect_attempt = time.monotonic()
 
                     sample = {
                         "time": tick,
