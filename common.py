@@ -440,9 +440,29 @@ def detect_debian_family() -> bool:
 def apt_install(packages: Sequence[str]) -> None:
     if not packages:
         return
-    env = {"DEBIAN_FRONTEND": "noninteractive"}
-    run(["sudo", "apt-get", "update", "-y"], env=env)
-    run(["sudo", "apt-get", "install", "-y", *packages], env=env)
+    # DEBIAN_FRONTEND=noninteractive   silences debconf prompts.
+    # DEBIAN_PRIORITY=critical         only ask on truly critical questions.
+    # NEEDRESTART_MODE=a               auto-restart services without the
+    #                                  curses 'Daemons using outdated libs' UI
+    #                                  that ships on Ubuntu 22.04+.
+    # NEEDRESTART_SUSPEND=1            backstop in case needrestart still tries.
+    env = {
+        "DEBIAN_FRONTEND": "noninteractive",
+        "DEBIAN_PRIORITY": "critical",
+        "NEEDRESTART_MODE": "a",
+        "NEEDRESTART_SUSPEND": "1",
+    }
+    # -o Dpkg::Options::=--force-confold|--force-confdef keeps existing config
+    # files on conflict instead of asking; Dpkg::Use-Pty=0 disables the pty UI.
+    apt_opts = [
+        "-y", "-q",
+        "-o", "Dpkg::Options::=--force-confdef",
+        "-o", "Dpkg::Options::=--force-confold",
+        "-o", "Dpkg::Use-Pty=0",
+    ]
+    # `sudo -E` preserves the DEBIAN_FRONTEND etc. env across sudo's filter.
+    run(["sudo", "-E", "apt-get", "update", *apt_opts], env=env)
+    run(["sudo", "-E", "apt-get", "install", *apt_opts, *packages], env=env)
 
 
 def pip_install(packages: Sequence[str]) -> None:
