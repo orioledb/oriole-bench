@@ -1,2 +1,4 @@
 mdcallag-tools/
 results/*
+log/
+__pycache__/

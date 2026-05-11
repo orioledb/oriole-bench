@@ -37,6 +37,7 @@ from common import (
     remove_dir,
     run,
     script_dir,
+    stage,
     stop_pg_silent,
     write_engine_config,
 )
@@ -88,40 +89,39 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
                     warehouses: int, go_tpc: Path, reuse_data: bool) -> bool:
     """Init/reuse PGDATA and run go-tpc prepare. Returns True if data was loaded."""
     if reuse_data and is_pgdata_initialized(pgdatadir):
-        log.info("Reusing existing TPC-C PGDATA at %s (warehouses=%d)",
-                 pgdatadir, warehouses)
-        stop_pg_silent(pgdatadir)
-        write_engine_config(pgdatadir, engine, "tpcc", memory_buffers)
-        pg_start(pgdatadir)
-        pg_restart(pgdatadir)
+        with stage(f"reuse pgdata {pgdatadir.name}"):
+            stop_pg_silent(pgdatadir)
+            write_engine_config(pgdatadir, engine, "tpcc", memory_buffers)
+            pg_start(pgdatadir)
+            pg_restart(pgdatadir)
         return False
 
-    log.info("Initializing TPC-C cluster: warehouses=%d engine=%s pgdata=%s",
-             warehouses, engine, pgdatadir)
-    run(["sudo", "killall", "-9", "postgres"], allow_fail=True)
-    stop_pg_silent(pgdatadir)
-    remove_dir(pgdatadir)
-    ensure_dir(pgdatadir.parent)
-    time.sleep(10)
-    pg_initdb(pgdatadir)
-    pg_start(pgdatadir)
+    with stage(f"init pgdata {pgdatadir.name} w={warehouses}"):
+        run(["sudo", "killall", "-9", "postgres"], allow_fail=True)
+        stop_pg_silent(pgdatadir)
+        remove_dir(pgdatadir)
+        ensure_dir(pgdatadir.parent)
+        time.sleep(10)
+        pg_initdb(pgdatadir)
+        pg_start(pgdatadir)
 
-    write_engine_config(pgdatadir, engine, "tpcc", memory_buffers)
-    if engine == "orioledb":
-        pg_psql("create extension orioledb;")
-    pg_restart(pgdatadir)
-    pg_psql("show shared_buffers; show orioledb.main_buffers; "
-            "show default_table_access_method;")
+        write_engine_config(pgdatadir, engine, "tpcc", memory_buffers)
+        if engine == "orioledb":
+            pg_psql("create extension orioledb;")
+        pg_restart(pgdatadir)
+        pg_psql("show shared_buffers; show orioledb.main_buffers; "
+                "show default_table_access_method;")
 
-    run([
-        str(go_tpc), "tpcc",
-        "--warehouses", str(warehouses),
-        "prepare", "-T", "100",
-        "-d", "postgres", "-U", "ubuntu", "-p", "5432",
-        "-D", "postgres", "-H", "127.0.0.1", "-P", "5432",
-        "--conn-params", "sslmode=disable",
-        "--no-check",
-    ])
+    with stage(f"go-tpc prepare w={warehouses}"):
+        run([
+            str(go_tpc), "tpcc",
+            "--warehouses", str(warehouses),
+            "prepare", "-T", "100",
+            "-d", "postgres", "-U", "ubuntu", "-p", "5432",
+            "-D", "postgres", "-H", "127.0.0.1", "-P", "5432",
+            "--conn-params", "sslmode=disable",
+            "--no-check",
+        ])
     return True
 
 
@@ -150,8 +150,6 @@ def run_tpcc_measure(
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     preflight(args)
-
-    log.info("TESTING PATCH %s", args.patch_id)
 
     memory_buffers = args.memory_buffers or "20GB"
 
@@ -182,37 +180,37 @@ def main(argv: list[str] | None = None) -> int:
                                  test="tpcc", scale=f"w{w}")
         append_line(result_file, f"# {fast_msg} NEW SERIES warehouses = {w} {now_str()}")
 
-        if not args.init_point:
-            prepare_cluster(pgdatadir, args.engine, memory_buffers, w,
-                            args.go_tpc, args.reuse_data)
-
-        for a in conns_list:
-            if args.init_point:
+        with stage(f"warehouses {w}"):
+            if not args.init_point:
                 prepare_cluster(pgdatadir, args.engine, memory_buffers, w,
-                                args.go_tpc, reuse_data=False)
+                                args.go_tpc, args.reuse_data)
 
-            append_text(result_file, f"{w},{a},")
-            pg_psql("checkpoint;")
+            for a in conns_list:
+                if args.init_point:
+                    prepare_cluster(pgdatadir, args.engine, memory_buffers, w,
+                                    args.go_tpc, reuse_data=False)
 
-            monitor_path = (
-                monitor_dir / f"w{w}-c{a}.jsonl"
-                if args.extended_logging else None
-            )
-            log.info("measuring %s warehouses=%d conns=%d", measure_time, w, a)
-            tpm = run_tpcc_measure(
-                go_tpc=args.go_tpc, warehouses=w, conns=a,
-                measure_time=measure_time,
-                monitor_path=monitor_path, mount_point=pgdatadir,
-            )
-            if tpm is None:
-                log.warning("No tpmTotal in go-tpc output")
-                append_line(result_file, "ERROR")
-            else:
-                append_line(result_file, str(tpm))
+                append_text(result_file, f"{w},{a},")
+                pg_psql("checkpoint;")
 
-        stop_pg_silent(pgdatadir)
+                monitor_path = (
+                    monitor_dir / f"w{w}-c{a}.jsonl"
+                    if args.extended_logging else None
+                )
+                tpm = run_tpcc_measure(
+                    go_tpc=args.go_tpc, warehouses=w, conns=a,
+                    measure_time=measure_time,
+                    monitor_path=monitor_path, mount_point=pgdatadir,
+                )
+                if tpm is None:
+                    log.warning("    w=%d conns=%d: no tpmTotal in output", w, a)
+                    append_line(result_file, "ERROR")
+                else:
+                    log.info("    w=%d conns=%d tpm=%d", w, a, tpm)
+                    append_line(result_file, str(tpm))
 
-    log.info("TPC-C tests finished")
+            stop_pg_silent(pgdatadir)
+
     return 0
 
 

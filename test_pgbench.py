@@ -37,6 +37,7 @@ from common import (
     remove_dir,
     run,
     script_dir,
+    stage,
     stop_pg_silent,
     write_engine_config,
 )
@@ -113,23 +114,22 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
     """
     stop_pg_silent(pgdatadir)
     if reuse_data and is_pgdata_initialized(pgdatadir):
-        log.info("Reusing existing PGDATA at %s", pgdatadir)
-        # Refresh engine config in case --memory-buffers changed.
-        ensure_dir(pgdatadir)
-        write_engine_config(pgdatadir, engine, "pgbench", memory_buffers)
-        pg_start(pgdatadir)
-        pg_restart(pgdatadir)
+        with stage(f"reuse pgdata {pgdatadir.name}"):
+            ensure_dir(pgdatadir)
+            write_engine_config(pgdatadir, engine, "pgbench", memory_buffers)
+            pg_start(pgdatadir)
+            pg_restart(pgdatadir)
         return False
 
-    log.info("Initializing fresh PGDATA at %s for engine=%s", pgdatadir, engine)
-    remove_dir(pgdatadir)
-    ensure_dir(pgdatadir.parent)
-    pg_initdb(pgdatadir)
-    pg_start(pgdatadir)
-    write_engine_config(pgdatadir, engine, "pgbench", memory_buffers)
-    if engine == "orioledb":
-        pg_psql("create extension orioledb;")
-    pg_restart(pgdatadir)
+    with stage(f"init pgdata {pgdatadir.name}"):
+        remove_dir(pgdatadir)
+        ensure_dir(pgdatadir.parent)
+        pg_initdb(pgdatadir)
+        pg_start(pgdatadir)
+        write_engine_config(pgdatadir, engine, "pgbench", memory_buffers)
+        if engine == "orioledb":
+            pg_psql("create extension orioledb;")
+        pg_restart(pgdatadir)
     return True
 
 
@@ -157,8 +157,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     preflight(args)
 
-    log.info("TESTING PATCH %s", args.patch_id)
-
     memory_buffers = args.memory_buffers or "32GB"
     if args.conns:
         conns_list = list(args.conns)
@@ -175,8 +173,9 @@ def main(argv: list[str] | None = None) -> int:
     needs_load = prepare_cluster(pgdatadir, args.engine, memory_buffers,
                                  args.reuse_data)
     if needs_load:
-        run(["pgbench", "postgres", "-i", f"-s{pgbench_scale}"])
-        pg_psql_file(script_dir / "orioledb-prepare-function.sql")
+        with stage(f"load pgbench s={pgbench_scale}"):
+            run(["pgbench", "postgres", "-i", f"-s{pgbench_scale}"])
+            pg_psql_file(script_dir / "orioledb-prepare-function.sql")
 
     ensure_dir(args.results_dir)
     result_file = args.results_dir / f"{args.engine}-{args.patch_id}-pgbench"
@@ -187,40 +186,36 @@ def main(argv: list[str] | None = None) -> int:
     append_line(result_file, f"# {fast_msg} {now_str()}")
     append_line(result_file, "# conns, tps")
 
-    log.info("Run pgbench tests: conns=%s tests=%s extended=%s",
-             conns_list, args.subtests, args.extended_logging)
-
     for t in args.subtests:
-        log.info("Run pgbench test %s", t)
-        append_line(result_file, subtest_headers[t])
+        with stage(f"subtest {t}"):
+            append_line(result_file, subtest_headers[t])
 
-        if t == "select":
-            extra: list[str] = ["-S"]
-        elif t == "tpcb":
-            extra = []
-        else:
-            extra = ["-f", str(script_dir / subtest_files[t])]
-
-        for c in conns_list:
-            log.info("%s conns: %d", t, c)
-            append_text(result_file, f"{c},")
-            pg_psql("checkpoint;")
-            monitor_path = (
-                monitor_dir / f"{t}-c{c}.jsonl"
-                if args.extended_logging else None
-            )
-            tps = run_pgbench_session(
-                extra_args=extra, conns=c, run_time=run_time,
-                monitor_path=monitor_path, mount_point=pgdatadir,
-            )
-            if tps is None:
-                log.warning("pgbench did not produce tps line for conns=%d test=%s", c, t)
-                append_line(result_file, "ERROR")
+            if t == "select":
+                extra: list[str] = ["-S"]
+            elif t == "tpcb":
+                extra = []
             else:
-                append_line(result_file, str(tps))
+                extra = ["-f", str(script_dir / subtest_files[t])]
+
+            for c in conns_list:
+                append_text(result_file, f"{c},")
+                pg_psql("checkpoint;")
+                monitor_path = (
+                    monitor_dir / f"{t}-c{c}.jsonl"
+                    if args.extended_logging else None
+                )
+                tps = run_pgbench_session(
+                    extra_args=extra, conns=c, run_time=run_time,
+                    monitor_path=monitor_path, mount_point=pgdatadir,
+                )
+                if tps is None:
+                    log.warning("    conns=%d: pgbench produced no tps line", c)
+                    append_line(result_file, "ERROR")
+                else:
+                    log.info("    conns=%d tps=%d", c, tps)
+                    append_line(result_file, str(tps))
 
     stop_pg_silent(pgdatadir)
-    log.info("pgbench tests finished")
     return 0
 
 

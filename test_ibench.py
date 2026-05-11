@@ -35,6 +35,7 @@ from common import (
     positive_int,
     remove_dir,
     script_dir,
+    stage,
     stop_pg_silent,
     write_engine_config,
 )
@@ -78,28 +79,26 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
                     reuse_data: bool) -> None:
     stop_pg_silent(pgdatadir)
     if reuse_data and is_pgdata_initialized(pgdatadir):
-        log.info("Reusing existing ibench PGDATA at %s", pgdatadir)
-        write_engine_config(pgdatadir, engine, "ibench", memory_buffers)
-        pg_start(pgdatadir)
-        pg_restart(pgdatadir)
+        with stage(f"reuse pgdata {pgdatadir.name}"):
+            write_engine_config(pgdatadir, engine, "ibench", memory_buffers)
+            pg_start(pgdatadir)
+            pg_restart(pgdatadir)
         return
 
-    log.info("Initializing fresh PGDATA at %s for engine=%s", pgdatadir, engine)
-    remove_dir(pgdatadir)
-    ensure_dir(pgdatadir.parent)
-    pg_initdb(pgdatadir)
-    pg_start(pgdatadir)
-    write_engine_config(pgdatadir, engine, "ibench", memory_buffers)
-    if engine == "orioledb":
-        pg_psql("create extension orioledb;")
-    pg_restart(pgdatadir)
+    with stage(f"init pgdata {pgdatadir.name}"):
+        remove_dir(pgdatadir)
+        ensure_dir(pgdatadir.parent)
+        pg_initdb(pgdatadir)
+        pg_start(pgdatadir)
+        write_engine_config(pgdatadir, engine, "ibench", memory_buffers)
+        if engine == "orioledb":
+            pg_psql("create extension orioledb;")
+        pg_restart(pgdatadir)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     preflight(args)
-
-    log.info("TESTING PATCH %s", args.patch_id)
 
     memory_buffers = args.memory_buffers or "70GB"
     if args.scale_mul is not None:
@@ -111,8 +110,6 @@ def main(argv: list[str] | None = None) -> int:
     pgdatadir = data_dir_for(args.pgdata_base, engine=args.engine,
                              test="ibench", scale=f"scale{scale_mul}")
     prepare_cluster(pgdatadir, args.engine, memory_buffers, args.reuse_data)
-
-    log.info("Running ibench for commit %s with %s", args.patch_id, args.engine)
 
     ensure_dir(args.results_dir)
     result_file = args.results_dir / f"{args.engine}-{args.patch_id}-ibench-scale{scale_mul}"
@@ -142,7 +139,6 @@ def main(argv: list[str] | None = None) -> int:
         monitor_dir=monitor_dir,
     )
 
-    log.info("Completed ibench for commit %s with %s", args.patch_id, args.engine)
     stop_pg_silent(pgdatadir)
     return 0
 

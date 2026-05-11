@@ -9,6 +9,7 @@ scripts only contain the actual benchmark logic.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +33,7 @@ from typing import Iterable, Mapping, Sequence
 script_dir = Path(__file__).resolve().parent
 default_results_dir = script_dir / "results"
 default_pgdata_base = Path("/ssd")
+log_dir = script_dir / "log"
 
 valid_engines = ("orioledb", "heap")
 valid_tests = ("pgbench", "tpcc", "ibench")
@@ -115,6 +117,101 @@ def die(msg: str, code: int = 1) -> "NoReturn":  # noqa: F821 - typing only
 
 
 # ---------------------------------------------------------------------------
+# Stage / log routing
+#
+# Each subprocess we run sends its stdout+stderr to a "current" log file under
+# log/. Top-level code wraps phases in `with stage("name"):` and the console
+# only sees stage transitions (→ start, ✓ ok, ✖ failed). All the noisy output
+# (apt, pip, configure, make, pgbench, go-tpc, ...) lands in log/<name>.log.
+# ---------------------------------------------------------------------------
+
+def _sanitize_log_name(name: str) -> str:
+    safe = []
+    for ch in name:
+        safe.append(ch if (ch.isalnum() or ch in "-_.") else "-")
+    cleaned = "".join(safe).strip("-")
+    return cleaned or "stage"
+
+
+class _LogRouter:
+    """Stack of log paths. The top of the stack receives subprocess output."""
+
+    def __init__(self) -> None:
+        self._stack: list[Path] = []
+        self._default = log_dir / "run.log"
+        # Parent processes pass their indentation depth via env so nested
+        # stage messages from child scripts line up visually.
+        try:
+            self._base_depth = int(os.environ.get("ORIOLE_BENCH_LOG_DEPTH", "0"))
+        except ValueError:
+            self._base_depth = 0
+
+    @property
+    def current(self) -> Path:
+        return self._stack[-1] if self._stack else self._default
+
+    def push(self, path: Path) -> None:
+        self._stack.append(path)
+
+    def pop(self) -> None:
+        if self._stack:
+            self._stack.pop()
+
+    def depth(self) -> int:
+        return self._base_depth + len(self._stack)
+
+
+log_router = _LogRouter()
+
+
+@contextlib.contextmanager
+def stage(name: str, *, file_name: str | None = None) -> Iterator[Path]:
+    """
+    Wrap a logical phase. The console sees one start + one finish line; all
+    subprocess output produced inside the block goes to log/<name>.log.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"{_sanitize_log_name(file_name or name)}.log"
+
+    indent = "  " * log_router.depth()
+    log.info("%s→ %s", indent, name)
+    started = time.monotonic()
+
+    with open(path, "a") as f:
+        f.write(f"\n{'=' * 60}\n{name}  (start: {now_str()})\n{'=' * 60}\n")
+
+    log_router.push(path)
+    try:
+        yield path
+    except BaseException as e:
+        elapsed = time.monotonic() - started
+        with open(path, "a") as f:
+            f.write(f"\n!!! FAILED after {elapsed:.1f}s: {e}\n")
+        log.error("%s✖ %s (%.1fs) — see %s", indent, name, elapsed, path)
+        raise
+    else:
+        elapsed = time.monotonic() - started
+        with open(path, "a") as f:
+            f.write(f"\n--- OK ({elapsed:.1f}s) ---\n")
+        log.info("%s✓ %s (%.1fs)", indent, name, elapsed)
+    finally:
+        log_router.pop()
+
+
+def _append_log(target: Path, text: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "a") as f:
+        f.write(text)
+
+
+def _tail(text: str, lines: int = 20, max_chars: int = 2000) -> str:
+    if not text:
+        return ""
+    out = "\n".join(text.splitlines()[-lines:])
+    return out[-max_chars:]
+
+
+# ---------------------------------------------------------------------------
 # Subprocess execution with strict error handling
 # ---------------------------------------------------------------------------
 
@@ -136,44 +233,85 @@ def run(
     input_text: str | None = None,
     timeout: float | None = None,
     allow_fail: bool = False,
+    log_file: Path | None = None,
+    inherit_io: bool = False,
 ) -> subprocess.CompletedProcess:
     """
-    Run a command synchronously with logging and strict error handling.
+    Run a command synchronously. stdout+stderr are redirected to the active
+    stage's log file (or `log_file=` override) so the console stays clean.
     Raises BenchError on non-zero exit unless allow_fail=True.
+
+    capture=True still returns stdout/stderr in the CompletedProcess for
+    parsing — the same text is *also* appended to the log file.
+
+    inherit_io=True passes parent's stdin/stdout/stderr through to the child
+    (used when invoking nested oriole-bench scripts whose own log lines should
+    reach the console).
     """
     if isinstance(cmd, str) and not shell:
         cmd_for_run: Sequence[str] | str = shlex.split(cmd)
     else:
         cmd_for_run = cmd
 
-    log.info("$ %s%s", _format_cmd(cmd), f"  (cwd={cwd})" if cwd else "")
+    target = log_file if log_file is not None else log_router.current
+    cwd_str = str(cwd) if cwd is not None else None
+    banner = f"$ {_format_cmd(cmd)}" + (f"  (cwd={cwd_str})" if cwd_str else "") + "\n"
+    _append_log(target, banner)
 
     try:
-        proc = subprocess.run(
-            cmd_for_run,
-            cwd=str(cwd) if cwd is not None else None,
-            env=({**os.environ, **env} if env is not None else None),
-            check=False,
-            capture_output=capture,
-            text=text,
-            shell=shell,
-            input=input_text,
-            timeout=timeout,
-        )
+        if inherit_io:
+            proc = subprocess.run(
+                cmd_for_run, cwd=cwd_str,
+                env=({**os.environ, **env} if env is not None else None),
+                check=False, text=text,
+                shell=shell, input=input_text, timeout=timeout,
+            )
+        elif capture:
+            proc = subprocess.run(
+                cmd_for_run, cwd=cwd_str,
+                env=({**os.environ, **env} if env is not None else None),
+                check=False, capture_output=True, text=text,
+                shell=shell, input=input_text, timeout=timeout,
+            )
+            tail_parts = []
+            if proc.stdout:
+                tail_parts.append(proc.stdout if proc.stdout.endswith("\n")
+                                  else proc.stdout + "\n")
+            if proc.stderr:
+                tail_parts.append("--- stderr ---\n")
+                tail_parts.append(proc.stderr if proc.stderr.endswith("\n")
+                                  else proc.stderr + "\n")
+            if tail_parts:
+                _append_log(target, "".join(tail_parts))
+        else:
+            with open(target, "a") as f:
+                f.flush()
+                proc = subprocess.run(
+                    cmd_for_run, cwd=cwd_str,
+                    env=({**os.environ, **env} if env is not None else None),
+                    check=False, stdout=f, stderr=subprocess.STDOUT, text=text,
+                    shell=shell, input=input_text, timeout=timeout,
+                )
     except FileNotFoundError as e:
-        raise BenchError(f"Executable not found while running: {_format_cmd(cmd)} ({e})") from e
+        raise BenchError(
+            f"Executable not found while running: {_format_cmd(cmd)} ({e})"
+        ) from e
     except subprocess.TimeoutExpired as e:
-        raise BenchError(f"Timeout {timeout}s expired for: {_format_cmd(cmd)}") from e
+        raise BenchError(
+            f"Timeout {timeout}s expired for: {_format_cmd(cmd)}\nSee log: {target}"
+        ) from e
     except OSError as e:
-        raise BenchError(f"OS error while running {_format_cmd(cmd)}: {e}") from e
+        raise BenchError(
+            f"OS error while running {_format_cmd(cmd)}: {e}\nSee log: {target}"
+        ) from e
 
     if check and not allow_fail and proc.returncode != 0:
-        stderr_msg = ""
-        if capture:
-            stderr_msg = f"\n--- stderr ---\n{(proc.stderr or '').strip()}"
-            stderr_msg += f"\n--- stdout ---\n{(proc.stdout or '').strip()}"
+        snippet = ""
+        if capture and proc.stderr:
+            snippet = f"\n--- last stderr ---\n{_tail(proc.stderr)}"
         raise BenchError(
-            f"Command failed with code {proc.returncode}: {_format_cmd(cmd)}{stderr_msg}"
+            f"Command failed with code {proc.returncode}: {_format_cmd(cmd)}"
+            f"\nSee log: {target}{snippet}"
         )
 
     return proc
@@ -187,14 +325,32 @@ def run_bg(
     stdout=None,
     stderr=None,
     shell: bool = False,
+    log_file: Path | None = None,
 ) -> subprocess.Popen:
+    """
+    Start a background process. If neither stdout nor stderr is specified, the
+    process inherits an exclusive log file (the stage's log by default, or
+    `log_file=`). wait_all() closes the handle.
+    """
     if isinstance(cmd, str) and not shell:
         cmd_for_run: Sequence[str] | str = shlex.split(cmd)
     else:
         cmd_for_run = cmd
 
-    log.info("(bg) $ %s", _format_cmd(cmd))
-    return subprocess.Popen(
+    log_fh = None
+    if stdout is None and stderr is None:
+        target = log_file if log_file is not None else log_router.current
+        target.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(target, "a")
+        log_fh.write(f"(bg) $ {_format_cmd(cmd)}\n")
+        log_fh.flush()
+        stdout = log_fh
+        stderr = subprocess.STDOUT
+        log_path: Path | None = target
+    else:
+        log_path = None
+
+    proc = subprocess.Popen(
         cmd_for_run,
         cwd=str(cwd) if cwd is not None else None,
         env=({**os.environ, **env} if env is not None else None),
@@ -203,26 +359,47 @@ def run_bg(
         shell=shell,
         text=True,
     )
+    proc._log_fh = log_fh  # type: ignore[attr-defined]
+    proc._log_path = log_path  # type: ignore[attr-defined]
+    return proc
 
 
 def wait_all(procs: Iterable[subprocess.Popen], *, label: str = "background job") -> None:
     procs_list = list(procs)
-    failures: list[tuple[int, int]] = []
-    for proc in procs_list:
-        try:
-            rc = proc.wait()
-        except KeyboardInterrupt:
-            for p in procs_list:
-                if p.poll() is None:
+    failures: list[tuple[int, int, Path | None]] = []
+    try:
+        for proc in procs_list:
+            try:
+                rc = proc.wait()
+            finally:
+                fh = getattr(proc, "_log_fh", None)
+                if fh is not None:
                     try:
-                        p.send_signal(signal.SIGTERM)
-                    except OSError:
+                        fh.close()
+                    except Exception:
                         pass
-            raise
-        if rc != 0:
-            failures.append((proc.pid, rc))
+            if rc != 0:
+                failures.append((proc.pid, rc, getattr(proc, "_log_path", None)))
+    except KeyboardInterrupt:
+        for p in procs_list:
+            if p.poll() is None:
+                try:
+                    p.send_signal(signal.SIGTERM)
+                except OSError:
+                    pass
+            fh = getattr(p, "_log_fh", None)
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+        raise
+
     if failures:
-        details = ", ".join(f"pid={pid}->rc={rc}" for pid, rc in failures)
+        details = ", ".join(
+            f"pid={pid}->rc={rc}" + (f" (log: {path})" if path else "")
+            for pid, rc, path in failures
+        )
         raise BenchError(f"One or more {label} processes failed: {details}")
 
 
@@ -416,6 +593,19 @@ def remove_dir(path: Path | str) -> None:
 
 
 def cpu_count() -> int:
+    """
+    Number of CPUs available to this process, matching what `nproc` reports
+    on Linux: respects cgroup / taskset CPU affinity. Falls back to the total
+    CPU count on platforms without sched_getaffinity.
+    """
+    getaffinity = getattr(os, "sched_getaffinity", None)
+    if getaffinity is not None:
+        try:
+            n = len(getaffinity(0))
+            if n > 0:
+                return n
+        except OSError:
+            pass
     return max(os.cpu_count() or 1, 1)
 
 

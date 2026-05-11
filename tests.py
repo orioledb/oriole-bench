@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import sys
 from pathlib import Path
 
@@ -36,18 +37,18 @@ from common import (
     default_results_dir,
     ensure_dir,
     log,
+    log_router,
     pg_build_exists,
     remove_dir,
     repo_clone_or_fetch,
     run,
     script_dir,
+    stage,
     valid_tests,
 )
 
 
-go_version = "1.21.1"
-go_tarball = f"go{go_version}.linux-arm64.tar.gz"
-go_url = f"https://dl.google.com/go/{go_tarball}"
+go_version = "1.23.5"
 
 oriole_repo = "https://github.com/orioledb/orioledb"
 postgres_oriole_repo = "https://github.com/orioledb/postgres"
@@ -57,6 +58,16 @@ go_tpc_repo = "https://github.com/pingcap/go-tpc.git"
 go_tpc_version = "v1.0.10"
 go_tpc_commit = "01c06538227a49fa8f0953cfdf3146a95b4a34a3"
 go_tpc_date = "2024-10-29 03:01:30"
+
+
+def detect_go_arch() -> str:
+    """Map the running machine to a Go-style GOARCH name."""
+    m = platform.machine().lower()
+    if m in ("aarch64", "arm64"):
+        return "arm64"
+    if m in ("x86_64", "amd64"):
+        return "amd64"
+    raise BenchError(f"Unsupported architecture for Go binary download: {m}")
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +210,9 @@ def preflight(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def clean_workspace_full() -> None:
-    log.info("--reinitialize: removing all cached source trees and builds.")
-    for d in ("orioledb", "postgres-oriole", "postgres-master", "pgbin", "go-tpc"):
-        remove_dir(script_dir / d)
+    with stage("clean workspace"):
+        for d in ("orioledb", "postgres-oriole", "postgres-master", "pgbin", "go-tpc"):
+            remove_dir(script_dir / d)
 
 
 def ensure_orioledb_prerequisites(args: argparse.Namespace) -> None:
@@ -242,41 +253,40 @@ def build_orioledb(oriole_id: str, *, force: bool) -> None:
         log.info("Reusing PG/orioledb build for %s at %s", oriole_id, workspace)
         return
 
-    log.info("=== Building OrioleDB stack for %s ===", oriole_id)
-    ensure_dir(workspace)
-    bin_dir = workspace / "bin"
+    with stage(f"build orioledb {oriole_id}"):
+        ensure_dir(workspace)
+        bin_dir = workspace / "bin"
 
-    orioledb_dir = script_dir / "orioledb"
-    pg_oriole_dir = script_dir / "postgres-oriole"
+        orioledb_dir = script_dir / "orioledb"
+        pg_oriole_dir = script_dir / "postgres-oriole"
 
-    run(["git", "checkout", oriole_id], cwd=orioledb_dir)
-    patchset = read_pg_patchset_for_oriole(orioledb_dir)
-    log.info("checkout patchset: %s", patchset)
-    run(["git", "checkout", *patchset.split()], cwd=pg_oriole_dir)
+        run(["git", "checkout", oriole_id], cwd=orioledb_dir)
+        patchset = read_pg_patchset_for_oriole(orioledb_dir)
+        run(["git", "checkout", *patchset.split()], cwd=pg_oriole_dir)
 
-    overlay_env = {
-        "PATH": f"{bin_dir}:{os.environ['PATH']}",
-        "GITHUB_WORKSPACE": str(workspace),
-    }
-    nproc = str(cpu_count())
+        overlay_env = {
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "GITHUB_WORKSPACE": str(workspace),
+        }
+        nproc = str(cpu_count())
 
-    run(["./configure", "--enable-debug", "--disable-cassert",
-         "--enable-tap-tests", "--with-icu",
-         f"--prefix={workspace}", "CFLAGS=-O3"],
-        cwd=pg_oriole_dir, env=overlay_env)
-    run(["make", "-j", nproc, "-s"], cwd=pg_oriole_dir, env=overlay_env)
-    run(["make", "-j", nproc, "-s", "install"], cwd=pg_oriole_dir, env=overlay_env)
-    run(["make", "-C", "src/bin/pgbench", "-j", nproc, "-s"],
-        cwd=pg_oriole_dir, env=overlay_env)
-    run(["make", "-C", "src/bin/pgbench", "-j", nproc, "-s", "install"],
-        cwd=pg_oriole_dir, env=overlay_env)
+        run(["./configure", "--enable-debug", "--disable-cassert",
+             "--enable-tap-tests", "--with-icu",
+             f"--prefix={workspace}", "CFLAGS=-O3"],
+            cwd=pg_oriole_dir, env=overlay_env)
+        run(["make", "-j", nproc, "-s"], cwd=pg_oriole_dir, env=overlay_env)
+        run(["make", "-j", nproc, "-s", "install"], cwd=pg_oriole_dir, env=overlay_env)
+        run(["make", "-C", "src/bin/pgbench", "-j", nproc, "-s"],
+            cwd=pg_oriole_dir, env=overlay_env)
+        run(["make", "-C", "src/bin/pgbench", "-j", nproc, "-s", "install"],
+            cwd=pg_oriole_dir, env=overlay_env)
 
-    run(["make", "-j", nproc, "USE_PGXS=1", "IS_DEV=1"],
-        cwd=orioledb_dir, env=overlay_env)
-    run(["make", "-j", nproc, "USE_PGXS=1", "IS_DEV=1", "install"],
-        cwd=orioledb_dir, env=overlay_env)
-    run(["make", "-j", nproc, "USE_PGXS=1", "IS_DEV=1", "clean"],
-        cwd=orioledb_dir, env=overlay_env)
+        run(["make", "-j", nproc, "USE_PGXS=1", "IS_DEV=1"],
+            cwd=orioledb_dir, env=overlay_env)
+        run(["make", "-j", nproc, "USE_PGXS=1", "IS_DEV=1", "install"],
+            cwd=orioledb_dir, env=overlay_env)
+        run(["make", "-j", nproc, "USE_PGXS=1", "IS_DEV=1", "clean"],
+            cwd=orioledb_dir, env=overlay_env)
 
 
 def build_pg_master(pg_id: str, *, force: bool) -> None:
@@ -285,45 +295,48 @@ def build_pg_master(pg_id: str, *, force: bool) -> None:
         log.info("Reusing PG master build for %s at %s", pg_id, workspace)
         return
 
-    log.info("=== Building Postgres master %s ===", pg_id)
-    ensure_dir(workspace)
-    bin_dir = workspace / "bin"
-    pg_dir = script_dir / "postgres-master"
+    with stage(f"build pg {pg_id}"):
+        ensure_dir(workspace)
+        bin_dir = workspace / "bin"
+        pg_dir = script_dir / "postgres-master"
 
-    overlay_env = {
-        "PATH": f"{bin_dir}:{os.environ['PATH']}",
-        "GITHUB_WORKSPACE": str(workspace),
-    }
+        overlay_env = {
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "GITHUB_WORKSPACE": str(workspace),
+        }
 
-    run(["git", "checkout", pg_id], cwd=pg_dir)
-    nproc = str(cpu_count())
-    run(["./configure", "--enable-debug", "--disable-cassert",
-         "--enable-tap-tests", "--with-icu",
-         f"--prefix={workspace}", "CFLAGS=-O3"],
-        cwd=pg_dir, env=overlay_env)
-    run(["make", "-j", nproc, "-s"], cwd=pg_dir, env=overlay_env)
-    run(["make", "-j", nproc, "-s", "install"], cwd=pg_dir, env=overlay_env)
-    run(["make", "-C", "contrib", "-j", nproc, "-s"], cwd=pg_dir, env=overlay_env)
-    run(["make", "-C", "contrib", "-j", nproc, "-s", "install"],
-        cwd=pg_dir, env=overlay_env)
+        run(["git", "checkout", pg_id], cwd=pg_dir)
+        nproc = str(cpu_count())
+        run(["./configure", "--enable-debug", "--disable-cassert",
+             "--enable-tap-tests", "--with-icu",
+             f"--prefix={workspace}", "CFLAGS=-O3"],
+            cwd=pg_dir, env=overlay_env)
+        run(["make", "-j", nproc, "-s"], cwd=pg_dir, env=overlay_env)
+        run(["make", "-j", nproc, "-s", "install"], cwd=pg_dir, env=overlay_env)
+        run(["make", "-C", "contrib", "-j", nproc, "-s"], cwd=pg_dir, env=overlay_env)
+        run(["make", "-C", "contrib", "-j", nproc, "-s", "install"],
+            cwd=pg_dir, env=overlay_env)
 
 
 def build_phase(args: argparse.Namespace) -> None:
-    log.info("==== BUILD PHASE ====")
-    if args.reinitialize:
-        clean_workspace_full()
+    with stage("build"):
+        if args.reinitialize:
+            clean_workspace_full()
 
-    if args.oriole_id:
-        repo_clone_or_fetch(oriole_repo, script_dir / "orioledb")
-        repo_clone_or_fetch(postgres_oriole_repo, script_dir / "postgres-oriole")
-        ensure_orioledb_prerequisites(args)
-        for oid in args.oriole_id:
-            build_orioledb(oid, force=args.reinitialize)
+        if args.oriole_id:
+            with stage("clone sources (orioledb)"):
+                repo_clone_or_fetch(oriole_repo, script_dir / "orioledb")
+                repo_clone_or_fetch(postgres_oriole_repo, script_dir / "postgres-oriole")
+            with stage("orioledb prerequisites"):
+                ensure_orioledb_prerequisites(args)
+            for oid in args.oriole_id:
+                build_orioledb(oid, force=args.reinitialize)
 
-    if args.pg_id:
-        repo_clone_or_fetch(postgres_master_repo, script_dir / "postgres-master")
-        for pgid in args.pg_id:
-            build_pg_master(pgid, force=args.reinitialize)
+        if args.pg_id:
+            with stage("clone sources (pg master)"):
+                repo_clone_or_fetch(postgres_master_repo, script_dir / "postgres-master")
+            for pgid in args.pg_id:
+                build_pg_master(pgid, force=args.reinitialize)
 
 
 # ---------------------------------------------------------------------------
@@ -331,32 +344,37 @@ def build_phase(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def install_go(*, force: bool) -> None:
-    if not force and (Path("/usr/local/go/bin/go").is_file() or
-                      common.script_dir.joinpath("go-tpc/bin/go-tpc").is_file()):
-        log.info("Reusing existing Go installation.")
+    go_arch = detect_go_arch()
+    tarball_name = f"go{go_version}.linux-{go_arch}.tar.gz"
+    go_url = f"https://dl.google.com/go/{tarball_name}"
+
+    if not force and Path("/usr/local/go/bin/go").is_file():
+        log.info("Reusing existing Go installation at /usr/local/go.")
     else:
-        log.info("Installing Go %s", go_version)
-        tarball = script_dir / go_tarball
-        run(["wget", "-q", go_url, "-O", str(tarball)], cwd=script_dir)
-        run(["sudo", "rm", "-rf", "/usr/local/go"])
-        run(["sudo", "tar", "-C", "/usr/local", "-xzf", str(tarball)])
-        try:
-            tarball.unlink()
-        except FileNotFoundError:
-            pass
+        with stage("install go"):
+            tarball = script_dir / tarball_name
+            run(["wget", "-q", go_url, "-O", str(tarball)], cwd=script_dir)
+            run(["sudo", "rm", "-rf", "/usr/local/go"])
+            run(["sudo", "tar", "-C", "/usr/local", "-xzf", str(tarball)])
+            try:
+                tarball.unlink()
+            except FileNotFoundError:
+                pass
 
     profile = Path.home() / ".profile"
     snippet_marker = "/usr/local/go/bin"
-    if profile.is_file() and snippet_marker in profile.read_text():
-        log.info("Go PATH already set in %s", profile)
-    else:
-        log.info("Setting up Go PATH in %s", profile)
+    if not (profile.is_file() and snippet_marker in profile.read_text()):
         with open(profile, "a") as f:
-            f.write("\nexport PATH=$PATH:/usr/local/go/bin\n")
+            f.write("\nexport PATH=$PATH:/usr/local/go/bin:$HOME/go/bin\n")
             f.write("export GOPATH=$HOME/go\n")
 
-    if "/usr/local/go/bin" not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = os.environ["PATH"] + ":/usr/local/go/bin"
+    gopath = str(Path.home() / "go")
+    os.environ.setdefault("GOPATH", gopath)
+    gobin = f"{gopath}/bin"
+    path = os.environ.get("PATH", "")
+    extras = [p for p in ("/usr/local/go/bin", gobin) if p not in path]
+    if extras:
+        os.environ["PATH"] = path + ":" + ":".join(extras)
 
 
 def build_go_tpc(*, force: bool) -> None:
@@ -366,68 +384,79 @@ def build_go_tpc(*, force: bool) -> None:
         log.info("Reusing existing go-tpc binary at %s", binary)
         return
 
-    if force or not (go_tpc_dir / ".git").exists():
-        remove_dir(go_tpc_dir)
-        run(["git", "clone", go_tpc_repo], cwd=script_dir)
-    else:
-        run(["git", "fetch", "--all", "--tags", "--prune"], cwd=go_tpc_dir)
+    with stage("build go-tpc"):
+        if force or not (go_tpc_dir / ".git").exists():
+            remove_dir(go_tpc_dir)
+            run(["git", "clone", go_tpc_repo], cwd=script_dir)
+        else:
+            run(["git", "fetch", "--all", "--tags", "--prune"], cwd=go_tpc_dir)
 
-    ldflags = (
-        f'-X "main.version={go_tpc_version}" '
-        f'-X "main.commit={go_tpc_commit}" '
-        f'-X "main.date={go_tpc_date}"'
-    )
-    env = {
-        "GO15VENDOREXPERIMENT": "1",
-        "CGO_ENABLED": "0",
-        "GOARCH": "arm64",
-        "GO111MODULE": "on",
-    }
-    run(["go", "build", "-ldflags", ldflags, "-o", "./bin/go-tpc",
-         "cmd/go-tpc/"],
-        cwd=go_tpc_dir, env=env)
-    if not binary.is_file():
-        raise BenchError(f"go-tpc binary not produced at {binary}")
+        # Lock to the version we advertise via ldflags so the source matches
+        # the build info.
+        run(["git", "checkout", go_tpc_version], cwd=go_tpc_dir)
+
+        go_arch = detect_go_arch()
+        ldflags = (
+            f'-X "main.version={go_tpc_version}" '
+            f'-X "main.commit={go_tpc_commit}" '
+            f'-X "main.date={go_tpc_date}"'
+        )
+        env = {
+            "CGO_ENABLED": "0",
+            "GOARCH": go_arch,
+            "GO111MODULE": "on",
+            # Use the public Go module proxy and skip checksum DB to avoid
+            # network/policy surprises on CI machines.
+            "GOPROXY": "https://proxy.golang.org,direct",
+            "GOSUMDB": "off",
+        }
+        run(["go", "mod", "download"], cwd=go_tpc_dir, env=env)
+        # `./cmd/go-tpc` (with the `./` prefix) makes Go treat it as a local
+        # package path rather than a stdlib import — otherwise newer Go
+        # toolchains may misinterpret it as `cmd/go-tpc` from std.
+        run(["go", "build", "-ldflags", ldflags, "-o", "./bin/go-tpc",
+             "./cmd/go-tpc"],
+            cwd=go_tpc_dir, env=env)
+        if not binary.is_file():
+            raise BenchError(f"go-tpc binary not produced at {binary}")
 
 
 def mount_nvme() -> None:
-    log.info("Mounting NVME volume...")
-    proc = run(["sudo", "parted", "-l", "-m"], capture=True, allow_fail=True)
-    if proc.returncode != 0:
-        raise BenchError("Failed to query disks via parted; try without --nvme.")
+    with stage("mount nvme"):
+        proc = run(["sudo", "parted", "-l", "-m"], capture=True, allow_fail=True)
+        if proc.returncode != 0:
+            raise BenchError("Failed to query disks via parted; try without --nvme.")
 
-    nvme_vol: str | None = None
-    for line in (proc.stdout or "").splitlines():
-        if "Amazon EC2 NVMe Instance Storage" in line:
-            nvme_vol = line.split(":", 1)[0]
-            break
-    if not nvme_vol:
-        raise BenchError(
-            "NVME volume not found in 'parted -l -m'. Try without --nvme."
-        )
-    log.info("NVME device: %s", nvme_vol)
+        nvme_vol: str | None = None
+        for line in (proc.stdout or "").splitlines():
+            if "Amazon EC2 NVMe Instance Storage" in line:
+                nvme_vol = line.split(":", 1)[0]
+                break
+        if not nvme_vol:
+            raise BenchError(
+                "NVME volume not found in 'parted -l -m'. Try without --nvme."
+            )
 
-    run(["sudo", "parted", nvme_vol, "mklabel", "gpt", "-s"])
-    run(["sudo", "parted", nvme_vol, "mkpart", "ext4", "0%", "100%", "-s"])
-    partition = f"{nvme_vol}p1"
-    run(["sudo", "mkfs.ext4", partition])
-    run(["sudo", "mount", "-t", "ext4", "-o", "defaults,nocheck", partition, "/ssd"])
-    run(["sudo", "chmod", "0777", "/ssd"])
-    log.info("Successfully mounted NVME volume.")
+        run(["sudo", "parted", nvme_vol, "mklabel", "gpt", "-s"])
+        run(["sudo", "parted", nvme_vol, "mkpart", "ext4", "0%", "100%", "-s"])
+        partition = f"{nvme_vol}p1"
+        run(["sudo", "mkfs.ext4", partition])
+        run(["sudo", "mount", "-t", "ext4", "-o", "defaults,nocheck", partition, "/ssd"])
+        run(["sudo", "chmod", "0777", "/ssd"])
 
 
 def setup_test_environment(args: argparse.Namespace) -> None:
-    log.info("==== PREPARE TESTS PHASE ====")
-    install_go(force=args.reinitialize)
-    build_go_tpc(force=args.reinitialize)
+    with stage("prepare environment"):
+        install_go(force=args.reinitialize)
+        build_go_tpc(force=args.reinitialize)
 
-    run(["sudo", "mkdir", "-p", str(args.pgdata_base)])
-    if args.nvme:
-        mount_nvme()
-    run(["sudo", "chmod", "0777", str(args.pgdata_base)])
+        run(["sudo", "mkdir", "-p", str(args.pgdata_base)])
+        if args.nvme:
+            mount_nvme()
+        run(["sudo", "chmod", "0777", str(args.pgdata_base)])
 
-    run(["sudo", "mkdir", "-p", str(args.results_dir)])
-    run(["sudo", "chmod", "0777", str(args.results_dir)])
+        run(["sudo", "mkdir", "-p", str(args.results_dir)])
+        run(["sudo", "chmod", "0777", str(args.results_dir)])
 
 
 # ---------------------------------------------------------------------------
@@ -483,40 +512,43 @@ def run_test(test_name: str, *, args: argparse.Namespace,
     if not test_script.is_file():
         raise BenchError(f"Test script missing: {test_script}")
 
+    # Forward our current stage depth so the child's "→ ..." lines align
+    # visually with the parent's.
     overlay_env = {
         "PATH": f"{prefix_path / 'bin'}:{os.environ['PATH']}",
         "GITHUB_WORKSPACE": str(prefix_path),
+        "ORIOLE_BENCH_LOG_DEPTH": str(log_router.depth()),
     }
-    cli = [sys.executable, str(test_script)] + child_args_for(
+    cli = [sys.executable, "-u", str(test_script)] + child_args_for(
         test_name, args=args, engine=engine, patch_id=patch_id,
     )
-    run(cli, env=overlay_env)
+    # inherit_io so the child's per-measurement log lines reach the console
+    # live; the child manages its own log/<...>.log files for subprocess noise.
+    run(cli, env=overlay_env, inherit_io=True)
 
 
 def test_phase(args: argparse.Namespace) -> None:
-    log.info("==== TEST PHASE ====")
-    if args.fast_run:
-        log.info("FAST RUN mode is on")
+    with stage("tests"):
+        if args.fast_run:
+            log.info("FAST RUN mode is on")
 
-    for oid in args.oriole_id:
-        prefix = script_dir / "pgbin" / oid
-        if not pg_build_exists(prefix):
-            raise BenchError(f"Missing PG binary build: {prefix}")
-        for t in args.tests:
-            log.info("RUN OrioleDB %s test_%s.py", oid, t)
-            run_test(t, args=args, engine="orioledb",
-                     patch_id=oid, prefix_path=prefix)
+        for oid in args.oriole_id:
+            prefix = script_dir / "pgbin" / oid
+            if not pg_build_exists(prefix):
+                raise BenchError(f"Missing PG binary build: {prefix}")
+            for t in args.tests:
+                with stage(f"{t} orioledb {oid}"):
+                    run_test(t, args=args, engine="orioledb",
+                             patch_id=oid, prefix_path=prefix)
 
-    for pgid in args.pg_id:
-        prefix = script_dir / "pgbin" / pgid
-        if not pg_build_exists(prefix):
-            raise BenchError(f"Missing PG binary build: {prefix}")
-        for t in args.tests:
-            log.info("RUN heap %s test_%s.py", pgid, t)
-            run_test(t, args=args, engine="heap",
-                     patch_id=pgid, prefix_path=prefix)
-
-    log.info("Oriole-bench tests finished")
+        for pgid in args.pg_id:
+            prefix = script_dir / "pgbin" / pgid
+            if not pg_build_exists(prefix):
+                raise BenchError(f"Missing PG binary build: {prefix}")
+            for t in args.tests:
+                with stage(f"{t} heap {pgid}"):
+                    run_test(t, args=args, engine="heap",
+                             patch_id=pgid, prefix_path=prefix)
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +563,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if not args.skip_bootstrap:
-            bootstrap_system()
+            with stage("bootstrap"):
+                bootstrap_system()
         else:
             log.info("--skip-bootstrap: not installing apt/pip packages.")
         build_phase(args)

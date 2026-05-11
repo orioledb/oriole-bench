@@ -25,7 +25,9 @@ from common import (
     BenchError,
     ResourceMonitor,
     log,
+    log_dir,
     run_bg,
+    stage,
     wait_all,
 )
 
@@ -219,14 +221,12 @@ def _run_phase(
     pgdatadir: Path,
     monitor_path: Path | None,
 ) -> float:
-    log.info("=== Ibench phase %s ===", p.label)
     start = time.monotonic()
-
     monitor_cm = (
         ResourceMonitor(monitor_path, mount_point=pgdatadir)
         if monitor_path is not None else contextlib.nullcontext()
     )
-    with monitor_cm:
+    with stage(f"ibench {p.label}"), monitor_cm:
         procs = []
         for n in range(1, conns + 1):
             cmd = _build_ibench_cmd(
@@ -238,13 +238,14 @@ def _run_phase(
                 engine=engine,
                 setup=setup,
             )
-            procs.append(run_bg(cmd))
+            # Each worker gets its own log file so the N parallel stdouts
+            # don't interleave in one file.
+            worker_log = log_dir / f"ibench-{p.label}-w{n:02d}.log"
+            procs.append(run_bg(cmd, log_file=worker_log))
 
         wait_all(procs, label=f"ibench phase {p.label}")
 
-    elapsed = time.monotonic() - start
-    log.info("Phase %s done in %.1fs", p.label, elapsed)
-    return elapsed
+    return time.monotonic() - start
 
 
 def run(
