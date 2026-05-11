@@ -422,6 +422,10 @@ def build_go_tpc(*, force: bool) -> None:
 
 
 def mount_nvme() -> None:
+    if os.path.ismount("/ssd"):
+        log.info("Reusing existing /ssd mount (skipping NVMe format).")
+        return
+
     with stage("mount nvme"):
         proc = run(["sudo", "parted", "-l", "-m"], capture=True, allow_fail=True)
         if proc.returncode != 0:
