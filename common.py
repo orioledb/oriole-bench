@@ -316,20 +316,23 @@ def run(
         ) from e
     except subprocess.TimeoutExpired as e:
         raise BenchError(
-            f"Timeout {timeout}s expired for: {_format_cmd(cmd)}\nSee log: {target}"
+            f"Timeout {timeout}s expired for: {_format_cmd(cmd)}"
         ) from e
     except OSError as e:
         raise BenchError(
-            f"OS error while running {_format_cmd(cmd)}: {e}\nSee log: {target}"
+            f"OS error while running {_format_cmd(cmd)}: {e}"
         ) from e
 
     if check and not allow_fail and proc.returncode != 0:
         snippet = ""
         if capture and proc.stderr:
             snippet = f"\n--- last stderr ---\n{_tail(proc.stderr)}"
+        # The path to the log is reported by stage() via log.error; including
+        # it in the BenchError message would just write it back into the same
+        # log file as a self-reference. Keep the message tight.
         raise BenchError(
-            f"Command failed with code {proc.returncode}: {_format_cmd(cmd)}"
-            f"\nSee log: {target}{snippet}"
+            f"Command failed with code {proc.returncode}: "
+            f"{_format_cmd(cmd)}{snippet}"
         )
 
     return proc
@@ -424,8 +427,9 @@ def wait_all(procs: Iterable[subprocess.Popen], *, label: str = "background job"
 
 
 def stop_pg_silent(pgdatadir: str | os.PathLike[str]) -> None:
+    logfile = str(_pg_logfile_for(pgdatadir))
     try:
-        run(["pg_ctl", "-D", str(pgdatadir), "-l", "logfile", "stop"], allow_fail=True)
+        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "stop"], allow_fail=True)
     except BenchError:
         pass
 
@@ -515,7 +519,14 @@ def check_linux() -> None:
 def add_common_test_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--patch-id", required=True,
-        help="Commit hash / tag / branch identifying the build under test.",
+        help="Full build identifier (kind-ref-compiler). Used for result "
+             "files and stage names so different compilers don't overwrite "
+             "each other.",
+    )
+    parser.add_argument(
+        "--data-id", default=None,
+        help="Data-scoped identifier used for PGDATA naming (kind-ref, "
+             "without compiler). Falls back to --patch-id if omitted.",
     )
     parser.add_argument(
         "--engine", required=True, choices=valid_engines,
@@ -580,18 +591,18 @@ def data_dir_for(
     base: Path,
     *,
     engine: str,
-    patch_id: str,
+    data_id: str,
     test: str,
     scale: str | int,
 ) -> Path:
     """
-    A per-(engine, patch_id, test, scale) data directory. Including the
-    patch_id (tag / commit hash / branch) prevents one build's data files
-    from being silently reused by an incompatible binary, and isolates
-    results between builds.
+    A per-(engine, data_id, test, scale) data directory. data_id is the
+    *data-scoped* part of the build identifier — typically <kind>-<ref>,
+    without the compiler suffix, so two builds of the same source ref with
+    different compilers can share the loaded dataset.
     """
-    safe_patch = _sanitize_log_name(patch_id)
-    return Path(base) / f"pgdata-{engine}-{safe_patch}-{test}-{scale}"
+    safe_id = _sanitize_log_name(data_id)
+    return Path(base) / f"pgdata-{engine}-{safe_id}-{test}-{scale}"
 
 
 # ---------------------------------------------------------------------------
@@ -800,15 +811,53 @@ def pg_initdb(pgdatadir: Path | str) -> None:
     ])
 
 
-def pg_start(pgdatadir: Path | str, logfile: str = "logfile") -> None:
-    run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "start"])
+def _pg_logfile_for(pgdatadir: Path | str) -> Path:
+    """Default per-PGDATA pg log path under log/."""
+    name = _sanitize_log_name(Path(pgdatadir).name) or "pg"
+    return log_dir / f"{name}.log"
 
 
-def pg_restart(pgdatadir: Path | str, logfile: str = "logfile") -> None:
-    run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "restart"])
+def _dump_pg_log_tail(logfile: Path | str, *, lines: int = 60) -> None:
+    """
+    On pg_ctl failure, copy the last N lines of PG's own log file into the
+    current stage log so the actual fatal/panic line is visible alongside
+    the failing command, without having to fish for the file.
+    """
+    p = Path(logfile)
+    if not p.is_file():
+        return
+    try:
+        text = p.read_text(errors="replace")
+    except OSError:
+        return
+    tail = "\n".join(text.splitlines()[-lines:])
+    _append_log(
+        log_router.current,
+        f"\n--- last {lines} lines of {p} ---\n{tail}\n--- end ---\n",
+    )
 
 
-def pg_stop(pgdatadir: Path | str, logfile: str = "logfile", *, allow_fail: bool = False) -> None:
+def pg_start(pgdatadir: Path | str, logfile: str | Path | None = None) -> None:
+    logfile = str(logfile) if logfile is not None else str(_pg_logfile_for(pgdatadir))
+    try:
+        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "start"])
+    except BenchError:
+        _dump_pg_log_tail(logfile)
+        raise
+
+
+def pg_restart(pgdatadir: Path | str, logfile: str | Path | None = None) -> None:
+    logfile = str(logfile) if logfile is not None else str(_pg_logfile_for(pgdatadir))
+    try:
+        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "restart"])
+    except BenchError:
+        _dump_pg_log_tail(logfile)
+        raise
+
+
+def pg_stop(pgdatadir: Path | str, logfile: str | Path | None = None,
+            *, allow_fail: bool = False) -> None:
+    logfile = str(logfile) if logfile is not None else str(_pg_logfile_for(pgdatadir))
     run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "stop"], allow_fail=allow_fail)
 
 

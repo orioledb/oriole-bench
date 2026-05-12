@@ -74,6 +74,14 @@ valid_compilers = tuple(compiler_cc.keys())
 def build_id(kind: str, ref: str, compiler: str) -> str:
     """Identifier for one (kind, ref, compiler) build — used as patch_id."""
     return f"{kind}-{common._sanitize_log_name(ref)}-{compiler}"
+
+
+def data_id(kind: str, ref: str) -> str:
+    """
+    Identifier for the data the build runs against. Compiler-agnostic, so
+    clang and gcc builds of the same ref share a PGDATA directory.
+    """
+    return f"{kind}-{common._sanitize_log_name(ref)}"
 hammerdb_binary_url = (
     f"https://github.com/TPC-Council/HammerDB/releases/download/"
     f"v{hammerdb_version}/HammerDB-{hammerdb_version}-Linux.tar.gz"
@@ -378,18 +386,21 @@ def build_pg_master(ref: str, compiler: str, bid: str, *, force: bool) -> None:
             cwd=pg_dir, env=overlay_env)
 
 
-def oriole_builds(args: argparse.Namespace) -> list[tuple[str, str, str]]:
-    """Cartesian product of --oriole-id × --compiler, each as (ref, compiler, build_id)."""
+def oriole_builds(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
+    """
+    Cartesian product of --oriole-id × --compiler, each as
+    (ref, compiler, build_id, data_id).
+    """
     return [
-        (ref, c, build_id("orioledb", ref, c))
+        (ref, c, build_id("orioledb", ref, c), data_id("orioledb", ref))
         for ref in args.oriole_id for c in args.compiler
     ]
 
 
-def pg_builds(args: argparse.Namespace) -> list[tuple[str, str, str]]:
+def pg_builds(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
     """Cartesian product of --pg-id × --compiler."""
     return [
-        (ref, c, build_id("pg", ref, c))
+        (ref, c, build_id("pg", ref, c), data_id("pg", ref))
         for ref in args.pg_id for c in args.compiler
     ]
 
@@ -405,13 +416,13 @@ def build_phase(args: argparse.Namespace) -> None:
                 repo_clone_or_fetch(postgres_oriole_repo, script_dir / "postgres-oriole")
             with stage("orioledb prerequisites"):
                 ensure_orioledb_prerequisites(args)
-            for ref, compiler, bid in oriole_builds(args):
+            for ref, compiler, bid, _did in oriole_builds(args):
                 build_orioledb(ref, compiler, bid, force=args.reinitialize)
 
         if args.pg_id:
             with stage("clone sources (pg master)"):
                 repo_clone_or_fetch(postgres_master_repo, script_dir / "postgres-master")
-            for ref, compiler, bid in pg_builds(args):
+            for ref, compiler, bid, _did in pg_builds(args):
                 build_pg_master(ref, compiler, bid, force=args.reinitialize)
 
 
@@ -600,9 +611,10 @@ def setup_test_environment(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def child_args_for(test_name: str, *, args: argparse.Namespace,
-                   engine: str, patch_id: str) -> list[str]:
+                   engine: str, patch_id: str, data_id: str) -> list[str]:
     cli: list[str] = [
         "--patch-id", patch_id,
+        "--data-id", data_id,
         "--engine", engine,
         "--pgdata-base", str(args.pgdata_base),
         "--results-dir", str(args.results_dir),
@@ -660,7 +672,8 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
 
 
 def run_test(test_name: str, *, args: argparse.Namespace,
-             engine: str, patch_id: str, prefix_path: Path) -> None:
+             engine: str, patch_id: str, data_id: str,
+             prefix_path: Path) -> None:
     test_script = script_dir / f"test_{test_name}.py"
     if not test_script.is_file():
         raise BenchError(f"Test script missing: {test_script}")
@@ -673,7 +686,8 @@ def run_test(test_name: str, *, args: argparse.Namespace,
         "ORIOLE_BENCH_LOG_DEPTH": str(log_router.depth()),
     }
     cli = [sys.executable, "-u", str(test_script)] + child_args_for(
-        test_name, args=args, engine=engine, patch_id=patch_id,
+        test_name, args=args, engine=engine,
+        patch_id=patch_id, data_id=data_id,
     )
     # inherit_io so the child's per-measurement log lines reach the console
     # live; the child manages its own log/<...>.log files for subprocess noise.
@@ -685,23 +699,23 @@ def test_phase(args: argparse.Namespace) -> None:
         if args.fast_run:
             log.info("FAST RUN mode is on")
 
-        for ref, compiler, bid in oriole_builds(args):
+        for ref, compiler, bid, did in oriole_builds(args):
             prefix = script_dir / "pgbin" / bid
             if not pg_build_exists(prefix):
                 raise BenchError(f"Missing PG binary build: {prefix}")
             for t in args.tests:
                 with stage(f"{t} {bid}"):
                     run_test(t, args=args, engine="orioledb",
-                             patch_id=bid, prefix_path=prefix)
+                             patch_id=bid, data_id=did, prefix_path=prefix)
 
-        for ref, compiler, bid in pg_builds(args):
+        for ref, compiler, bid, did in pg_builds(args):
             prefix = script_dir / "pgbin" / bid
             if not pg_build_exists(prefix):
                 raise BenchError(f"Missing PG binary build: {prefix}")
             for t in args.tests:
                 with stage(f"{t} {bid}"):
                     run_test(t, args=args, engine="heap",
-                             patch_id=bid, prefix_path=prefix)
+                             patch_id=bid, data_id=did, prefix_path=prefix)
 
 
 # ---------------------------------------------------------------------------

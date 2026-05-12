@@ -341,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for w in warehouses_list:
         pgdatadir = data_dir_for(args.pgdata_base, engine=args.engine,
-                                 patch_id=args.patch_id,
+                                 data_id=args.data_id or args.patch_id,
                                  test="tpcc_hdb", scale=f"w{w}")
         append_line(result_file,
                     f"# {fast_msg} NEW SERIES warehouses = {w} {now_str()}")

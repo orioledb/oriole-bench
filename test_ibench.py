@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     fast_msg = "FAST RUN!" if args.fast_run else ""
 
     pgdatadir = data_dir_for(args.pgdata_base, engine=args.engine,
-                             patch_id=args.patch_id,
+                             data_id=args.data_id or args.patch_id,
                              test="ibench", scale=f"scale{scale_mul}")
     prepare_cluster(pgdatadir, args.engine, memory_buffers,
                     args.undo_buffers, args.fsync, args.synchronous_commit,
