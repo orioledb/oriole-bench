@@ -78,10 +78,13 @@ def build_id(kind: str, ref: str, compiler: str) -> str:
 
 def data_id(kind: str, ref: str) -> str:
     """
-    Identifier for the data the build runs against. Compiler-agnostic, so
-    clang and gcc builds of the same ref share a PGDATA directory.
+    Identifier for the data the build runs against — just the sanitised
+    git ref. Compiler-agnostic so clang/gcc share a PGDATA; engine is
+    already part of the path so we don't repeat the kind here either
+    (e.g. orioledb engine + 'orioledb-' prefix → 'orioledb-orioledb-…').
     """
-    return f"{kind}-{common._sanitize_log_name(ref)}"
+    del kind  # kept in signature for symmetry with build_id()
+    return common._sanitize_log_name(ref)
 hammerdb_binary_url = (
     f"https://github.com/TPC-Council/HammerDB/releases/download/"
     f"v{hammerdb_version}/HammerDB-{hammerdb_version}-Linux.tar.gz"
