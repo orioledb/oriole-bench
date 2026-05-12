@@ -181,8 +181,13 @@ def _tcl_quote(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _hammerdb_run(tcl_path: Path, hammerdb: Path, *, capture: bool) -> str | None:
-    """Invoke hammerdbcli in auto mode, return captured stdout if requested."""
+def _hammerdb_run(tcl_path: Path, hammerdb: Path, *,
+                  output_path: Path) -> str:
+    """
+    Invoke hammerdbcli in auto mode. HammerDB's stdout/stderr stream into
+    `output_path` live (so you can `tail -f` it during long runs). Returns
+    the captured output as a string for parsing.
+    """
     hdb_cli = hammerdb / "hammerdbcli"
     cmd = [str(hdb_cli), "auto", str(tcl_path)]
 
@@ -201,11 +206,10 @@ def _hammerdb_run(tcl_path: Path, hammerdb: Path, *, capture: bool) -> str | Non
             pg_lib + (":" + existing if existing else "")
         )
 
-    if capture:
-        proc = run(cmd, cwd=hammerdb, env=env, capture=True)
-        return proc.stdout or ""
-    run(cmd, cwd=hammerdb, env=env)
-    return None
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("")  # truncate any leftover from a prior run
+    run(cmd, cwd=hammerdb, env=env, log_file=output_path)
+    return output_path.read_text()
 
 
 def _build_tcl(warehouses: int, build_vu: int, superuser: str) -> str:
@@ -233,6 +237,10 @@ exit
 
 def _run_tcl(vu: int, rampup_min: int, duration_min: int,
              superuser: str) -> str:
+    # pg_total_iterations is the upper bound on TX count per virtual user —
+    # even in timed mode, setting it to 0 makes every worker do zero
+    # transactions and exit immediately. Use a large number so timed mode
+    # actually keeps the workers looping until rampup+duration elapses.
     return f"""\
 dbset db pg
 dbset bm TPC-C
@@ -247,7 +255,7 @@ diset tpcc pg_dbase {hdb_pg_dbase}
 diset tpcc pg_driver timed
 diset tpcc pg_rampup {rampup_min}
 diset tpcc pg_duration {duration_min}
-diset tpcc pg_total_iterations 0
+diset tpcc pg_total_iterations 10000000
 diset tpcc pg_storedprocs true
 diset tpcc pg_allwarehouse true
 diset tpcc pg_raiseerror true
@@ -255,7 +263,6 @@ loadscript
 vuset vu {vu}
 vucreate
 vurun
-runtimer {(rampup_min + duration_min) * 60 + 60}
 vudestroy
 exit
 """
@@ -263,30 +270,33 @@ exit
 
 def hdb_build(*, hammerdb: Path, warehouses: int, build_vu: int,
               superuser: str) -> None:
+    ensure_dir(log_dir)
+    tcl = log_dir / f"hdb-build-w{warehouses}.tcl"
+    output = log_dir / f"hdb-build-w{warehouses}.log"
+    tcl.write_text(_build_tcl(warehouses, build_vu, superuser))
     with stage(f"hdb build w={warehouses}"):
-        tcl = log_dir / f"hdb-build-w{warehouses}.tcl"
-        ensure_dir(log_dir)
-        tcl.write_text(_build_tcl(warehouses, build_vu, superuser))
-        _hammerdb_run(tcl, hammerdb, capture=False)
+        _hammerdb_run(tcl, hammerdb, output_path=output)
 
 
 def hdb_run_one(*, hammerdb: Path, vu: int, rampup_min: int,
                 duration_min: int, superuser: str,
                 monitor_path: Path | None, pgdatadir: Path,
                 warehouses: int) -> tuple[int, int] | None:
-    tcl = log_dir / f"hdb-run-w{warehouses}-vu{vu}.tcl"
     ensure_dir(log_dir)
+    tcl = log_dir / f"hdb-run-w{warehouses}-vu{vu}.tcl"
+    output = log_dir / f"hdb-run-w{warehouses}-vu{vu}.log"
     tcl.write_text(_run_tcl(vu, rampup_min, duration_min, superuser))
 
     cm = (
         ResourceMonitor(monitor_path, mount_point=pgdatadir,
                         pgdatadir=pgdatadir,
-                        dsn=f"host=127.0.0.1 port=5432 dbname={hdb_pg_dbase} user={hdb_pg_user}")
+                        dsn=(f"host=127.0.0.1 port=5432 "
+                             f"dbname={hdb_pg_dbase} user={hdb_pg_user}"))
         if monitor_path is not None else contextlib.nullcontext()
     )
-    with cm:
-        output = _hammerdb_run(tcl, hammerdb, capture=True)
-    return parse_hdb_result(output or "")
+    with stage(f"hdb run w={warehouses} vu={vu}"), cm:
+        raw = _hammerdb_run(tcl, hammerdb, output_path=output)
+    return parse_hdb_result(raw)
 
 
 # ---------------------------------------------------------------------------
