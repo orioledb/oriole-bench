@@ -70,15 +70,6 @@ compiler_cc = {
 }
 valid_compilers = tuple(compiler_cc.keys())
 
-# Pre-cached autoconf check results passed to ./configure. Clang accepts
-# SSE4.2 CRC32C intrinsics without -msse4.2, which makes PG pick the direct-
-# call USE_SSE42_CRC32C path — that path doesn't define the pg_comp_crc32c
-# function pointer, and orioledb.so references that symbol on load. Pre-
-# caching the no-flag intrinsic check to "no" forces PG into the runtime-
-# check path (matching gcc's natural outcome), where pg_comp_crc32c is
-# defined and exported. Harmless under gcc (its natural answer is already "no").
-configure_cache_overrides = ["pgac_cv_sse42_crc32_intrinsics_=no"]
-
 
 def build_id(kind: str, ref: str, compiler: str) -> str:
     """Identifier for one (kind, ref, compiler) build — used as patch_id."""
@@ -358,8 +349,7 @@ def build_orioledb(ref: str, compiler: str, bid: str, *, force: bool) -> None:
 
         run(["./configure", "--enable-debug", "--disable-cassert",
              "--enable-tap-tests", "--with-icu",
-             f"--prefix={workspace}", f"CC={cc}", "CFLAGS=-O3",
-             *configure_cache_overrides],
+             f"--prefix={workspace}", f"CC={cc}", "CFLAGS=-O3"],
             cwd=pg_oriole_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s"], cwd=pg_oriole_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s", "install"], cwd=pg_oriole_dir, env=overlay_env)
@@ -401,8 +391,7 @@ def build_pg_master(ref: str, compiler: str, bid: str, *, force: bool) -> None:
         nproc = str(cpu_count())
         run(["./configure", "--enable-debug", "--disable-cassert",
              "--enable-tap-tests", "--with-icu",
-             f"--prefix={workspace}", f"CC={cc}", "CFLAGS=-O3",
-             *configure_cache_overrides],
+             f"--prefix={workspace}", f"CC={cc}", "CFLAGS=-O3"],
             cwd=pg_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s"], cwd=pg_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s", "install"], cwd=pg_dir, env=overlay_env)
