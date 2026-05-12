@@ -118,9 +118,9 @@ def main(argv: list[str] | None = None) -> int:
                     args.reuse_data)
 
     ensure_dir(args.results_dir)
-    result_file = args.results_dir / f"{args.engine}-{args.patch_id}-ibench-scale{scale_mul}"
+    result_file = args.results_dir / f"{args.patch_id}-ibench-scale{scale_mul}"
     monitor_dir = (
-        args.results_dir / f"{args.engine}-{args.patch_id}-ibench-scale{scale_mul}-resources"
+        args.results_dir / f"{args.patch_id}-ibench-scale{scale_mul}-resources"
         if args.extended_logging else None
     )
     if monitor_dir is not None:

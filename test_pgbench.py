@@ -184,8 +184,8 @@ def main(argv: list[str] | None = None) -> int:
             pg_psql_file(script_dir / "orioledb-prepare-function.sql")
 
     ensure_dir(args.results_dir)
-    result_file = args.results_dir / f"{args.engine}-{args.patch_id}-pgbench"
-    monitor_dir = args.results_dir / f"{args.engine}-{args.patch_id}-pgbench-resources"
+    result_file = args.results_dir / f"{args.patch_id}-pgbench"
+    monitor_dir = args.results_dir / f"{args.patch_id}-pgbench-resources"
     if args.extended_logging:
         ensure_dir(monitor_dir)
 

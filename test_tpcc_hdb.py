@@ -328,9 +328,9 @@ def main(argv: list[str] | None = None) -> int:
         fast_msg = ""
 
     ensure_dir(args.results_dir)
-    result_file = args.results_dir / f"{args.engine}-{args.patch_id}-tpcc_hdb"
+    result_file = args.results_dir / f"{args.patch_id}-tpcc_hdb"
     monitor_dir = (
-        args.results_dir / f"{args.engine}-{args.patch_id}-tpcc_hdb-resources"
+        args.results_dir / f"{args.patch_id}-tpcc_hdb-resources"
         if args.extended_logging else None
     )
     if monitor_dir is not None:

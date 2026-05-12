@@ -183,8 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         fast_msg = ""
 
     ensure_dir(args.results_dir)
-    result_file = args.results_dir / f"{args.engine}-{args.patch_id}-tpcc"
-    monitor_dir = args.results_dir / f"{args.engine}-{args.patch_id}-tpcc-resources"
+    result_file = args.results_dir / f"{args.patch_id}-tpcc"
+    monitor_dir = args.results_dir / f"{args.patch_id}-tpcc-resources"
     if args.extended_logging:
         ensure_dir(monitor_dir)
 
