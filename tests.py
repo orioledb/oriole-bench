@@ -61,6 +61,19 @@ go_tpc_commit = "89aa038"
 go_tpc_date = "2026-05-12"
 
 hammerdb_version = "4.12"
+
+# Map the user-facing --compiler choice to the CC value passed to configure.
+# clang-17 is what orioledb/ci/prerequisites.sh installs on Ubuntu.
+compiler_cc = {
+    "clang": "clang-17",
+    "gcc":   "gcc",
+}
+valid_compilers = tuple(compiler_cc.keys())
+
+
+def build_id(kind: str, ref: str, compiler: str) -> str:
+    """Identifier for one (kind, ref, compiler) build — used as patch_id."""
+    return f"{kind}-{common._sanitize_log_name(ref)}-{compiler}"
 hammerdb_binary_url = (
     f"https://github.com/TPC-Council/HammerDB/releases/download/"
     f"v{hammerdb_version}/HammerDB-{hammerdb_version}-Linux.tar.gz"
@@ -105,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--fast-run", action="store_true",
         help="Run fast for debug; not for actual measurements.",
+    )
+    p.add_argument(
+        "--compiler", nargs="+", default=["clang"], choices=valid_compilers,
+        help="C compiler(s) to build PG with. Each (ref, compiler) pair "
+             "becomes its own build under pgbin/<kind>-<ref>-<compiler>.",
     )
     p.add_argument(
         "--nvme", action="store_true",
@@ -279,20 +297,21 @@ def read_pg_patchset_for_oriole(orioledb_dir: Path) -> str:
     raise BenchError(f"No PG17 patchset entry found in {pgtags}")
 
 
-def build_orioledb(oriole_id: str, *, force: bool) -> None:
-    workspace = script_dir / "pgbin" / oriole_id
+def build_orioledb(ref: str, compiler: str, bid: str, *, force: bool) -> None:
+    workspace = script_dir / "pgbin" / bid
     if pg_build_exists(workspace) and not force:
-        log.info("Reusing PG/orioledb build for %s at %s", oriole_id, workspace)
+        log.info("Reusing PG/orioledb build %s at %s", bid, workspace)
         return
 
-    with stage(f"build orioledb {oriole_id}"):
+    cc = compiler_cc[compiler]
+    with stage(f"build {bid}"):
         ensure_dir(workspace)
         bin_dir = workspace / "bin"
 
         orioledb_dir = script_dir / "orioledb"
         pg_oriole_dir = script_dir / "postgres-oriole"
 
-        run(["git", "checkout", oriole_id], cwd=orioledb_dir)
+        run(["git", "checkout", ref], cwd=orioledb_dir)
         patchset = read_pg_patchset_for_oriole(orioledb_dir)
         run(["git", "checkout", *patchset.split()], cwd=pg_oriole_dir)
 
@@ -304,7 +323,7 @@ def build_orioledb(oriole_id: str, *, force: bool) -> None:
 
         run(["./configure", "--enable-debug", "--disable-cassert",
              "--enable-tap-tests", "--with-icu",
-             f"--prefix={workspace}", "CFLAGS=-O3"],
+             f"--prefix={workspace}", f"CC={cc}", "CFLAGS=-O3"],
             cwd=pg_oriole_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s"], cwd=pg_oriole_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s", "install"], cwd=pg_oriole_dir, env=overlay_env)
@@ -321,13 +340,14 @@ def build_orioledb(oriole_id: str, *, force: bool) -> None:
             cwd=orioledb_dir, env=overlay_env)
 
 
-def build_pg_master(pg_id: str, *, force: bool) -> None:
-    workspace = script_dir / "pgbin" / pg_id
+def build_pg_master(ref: str, compiler: str, bid: str, *, force: bool) -> None:
+    workspace = script_dir / "pgbin" / bid
     if pg_build_exists(workspace) and not force:
-        log.info("Reusing PG master build for %s at %s", pg_id, workspace)
+        log.info("Reusing PG master build %s at %s", bid, workspace)
         return
 
-    with stage(f"build pg {pg_id}"):
+    cc = compiler_cc[compiler]
+    with stage(f"build {bid}"):
         ensure_dir(workspace)
         bin_dir = workspace / "bin"
         pg_dir = script_dir / "postgres-master"
@@ -337,17 +357,33 @@ def build_pg_master(pg_id: str, *, force: bool) -> None:
             "GITHUB_WORKSPACE": str(workspace),
         }
 
-        run(["git", "checkout", pg_id], cwd=pg_dir)
+        run(["git", "checkout", ref], cwd=pg_dir)
         nproc = str(cpu_count())
         run(["./configure", "--enable-debug", "--disable-cassert",
              "--enable-tap-tests", "--with-icu",
-             f"--prefix={workspace}", "CFLAGS=-O3"],
+             f"--prefix={workspace}", f"CC={cc}", "CFLAGS=-O3"],
             cwd=pg_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s"], cwd=pg_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s", "install"], cwd=pg_dir, env=overlay_env)
         run(["make", "-C", "contrib", "-j", nproc, "-s"], cwd=pg_dir, env=overlay_env)
         run(["make", "-C", "contrib", "-j", nproc, "-s", "install"],
             cwd=pg_dir, env=overlay_env)
+
+
+def oriole_builds(args: argparse.Namespace) -> list[tuple[str, str, str]]:
+    """Cartesian product of --oriole-id × --compiler, each as (ref, compiler, build_id)."""
+    return [
+        (ref, c, build_id("orioledb", ref, c))
+        for ref in args.oriole_id for c in args.compiler
+    ]
+
+
+def pg_builds(args: argparse.Namespace) -> list[tuple[str, str, str]]:
+    """Cartesian product of --pg-id × --compiler."""
+    return [
+        (ref, c, build_id("pg", ref, c))
+        for ref in args.pg_id for c in args.compiler
+    ]
 
 
 def build_phase(args: argparse.Namespace) -> None:
@@ -361,14 +397,14 @@ def build_phase(args: argparse.Namespace) -> None:
                 repo_clone_or_fetch(postgres_oriole_repo, script_dir / "postgres-oriole")
             with stage("orioledb prerequisites"):
                 ensure_orioledb_prerequisites(args)
-            for oid in args.oriole_id:
-                build_orioledb(oid, force=args.reinitialize)
+            for ref, compiler, bid in oriole_builds(args):
+                build_orioledb(ref, compiler, bid, force=args.reinitialize)
 
         if args.pg_id:
             with stage("clone sources (pg master)"):
                 repo_clone_or_fetch(postgres_master_repo, script_dir / "postgres-master")
-            for pgid in args.pg_id:
-                build_pg_master(pgid, force=args.reinitialize)
+            for ref, compiler, bid in pg_builds(args):
+                build_pg_master(ref, compiler, bid, force=args.reinitialize)
 
 
 # ---------------------------------------------------------------------------
@@ -639,23 +675,23 @@ def test_phase(args: argparse.Namespace) -> None:
         if args.fast_run:
             log.info("FAST RUN mode is on")
 
-        for oid in args.oriole_id:
-            prefix = script_dir / "pgbin" / oid
+        for ref, compiler, bid in oriole_builds(args):
+            prefix = script_dir / "pgbin" / bid
             if not pg_build_exists(prefix):
                 raise BenchError(f"Missing PG binary build: {prefix}")
             for t in args.tests:
-                with stage(f"{t} orioledb {oid}"):
+                with stage(f"{t} {bid}"):
                     run_test(t, args=args, engine="orioledb",
-                             patch_id=oid, prefix_path=prefix)
+                             patch_id=bid, prefix_path=prefix)
 
-        for pgid in args.pg_id:
-            prefix = script_dir / "pgbin" / pgid
+        for ref, compiler, bid in pg_builds(args):
+            prefix = script_dir / "pgbin" / bid
             if not pg_build_exists(prefix):
                 raise BenchError(f"Missing PG binary build: {prefix}")
             for t in args.tests:
-                with stage(f"{t} heap {pgid}"):
+                with stage(f"{t} {bid}"):
                     run_test(t, args=args, engine="heap",
-                             patch_id=pgid, prefix_path=prefix)
+                             patch_id=bid, prefix_path=prefix)
 
 
 # ---------------------------------------------------------------------------
