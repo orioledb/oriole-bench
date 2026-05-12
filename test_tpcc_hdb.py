@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import getpass
+import os
 import re
 import sys
 import time
@@ -184,10 +185,26 @@ def _hammerdb_run(tcl_path: Path, hammerdb: Path, *, capture: bool) -> str | Non
     """Invoke hammerdbcli in auto mode, return captured stdout if requested."""
     hdb_cli = hammerdb / "hammerdbcli"
     cmd = [str(hdb_cli), "auto", str(tcl_path)]
+
+    # HammerDB ships libpgtcl2.1.1.so under ./lib/pgtcl2.1.1/. Pgtcl is
+    # dynamically linked against libpq.so.5, which we deliberately don't
+    # install system-wide — our libpq lives in the per-ref build under
+    # $GITHUB_WORKSPACE/lib. Tell the linker where to find it; the
+    # hammerdbcli wrapper itself prepends ./lib, so our value is appended
+    # after that and Pgtcl resolves cleanly.
+    env: dict[str, str] = {}
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    if workspace:
+        pg_lib = str(Path(workspace) / "lib")
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = (
+            pg_lib + (":" + existing if existing else "")
+        )
+
     if capture:
-        proc = run(cmd, cwd=hammerdb, capture=True)
+        proc = run(cmd, cwd=hammerdb, env=env, capture=True)
         return proc.stdout or ""
-    run(cmd, cwd=hammerdb)
+    run(cmd, cwd=hammerdb, env=env)
     return None
 
 

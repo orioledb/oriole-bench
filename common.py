@@ -777,7 +777,15 @@ def pg_psql_file(path: Path | str, *, db: str = "postgres") -> subprocess.Comple
 
 
 def pg_initdb(pgdatadir: Path | str) -> None:
-    run(["initdb", str(pgdatadir), "--no-locale"])
+    # --auth-host=trust opens TCP/localhost connections regardless of the
+    # password supplied — the benchmark drivers (HammerDB, go-tpc) connect
+    # over 127.0.0.1 with whatever placeholder password and otherwise hit
+    # PG's scram-sha-256 default. We're benchmarking on a single host, no
+    # security concerns. --auth-local mirrors that for consistency.
+    run([
+        "initdb", str(pgdatadir), "--no-locale",
+        "--auth-host=trust", "--auth-local=trust",
+    ])
 
 
 def pg_start(pgdatadir: Path | str, logfile: str = "logfile") -> None:
