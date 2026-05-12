@@ -59,6 +59,12 @@ go_tpc_version = "v1.0.10"
 go_tpc_commit = "01c06538227a49fa8f0953cfdf3146a95b4a34a3"
 go_tpc_date = "2024-10-29 03:01:30"
 
+hammerdb_version = "4.12"
+hammerdb_binary_url = (
+    f"https://github.com/TPC-Council/HammerDB/releases/download/"
+    f"v{hammerdb_version}/HammerDB-{hammerdb_version}-Linux.tar.gz"
+)
+
 
 def detect_go_arch() -> str:
     """Map the running machine to a Go-style GOARCH name."""
@@ -164,6 +170,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Path to mdcallag iibench.py.")
     ib.add_argument("--ibench-conns", type=common.positive_int, default=20,
                     help="Ibench: number of parallel workers per phase.")
+
+    hdb = p.add_argument_group("tpcc_hdb (HammerDB stored-procedure TPC-C)")
+    hdb.add_argument("--hdb-rampup-min", type=common.positive_int, default=2,
+                     help="HammerDB: rampup time in minutes (ignored on --fast-run).")
+    hdb.add_argument("--hdb-duration-min", type=common.positive_int, default=5,
+                     help="HammerDB: measurement duration in minutes "
+                          "(ignored on --fast-run).")
+    hdb.add_argument("--hdb-build-vu", type=common.positive_int, default=16,
+                     help="HammerDB: virtual users used for schema BUILD.")
 
     return p
 
@@ -386,6 +401,54 @@ def install_go(*, force: bool) -> None:
         os.environ["PATH"] = path + ":" + ":".join(extras)
 
 
+def install_hammerdb(*, force: bool, needed: bool) -> None:
+    """
+    Make sure ./hammerdb is a runnable HammerDB tree.
+
+    Only amd64 is supported for now — HammerDB ships an x86_64 binary tarball
+    and the source build pipeline (Bawt + bundled tclkit-Linux64) is also
+    x86_64-only. On arm64 we error out clearly; arm64 support would require
+    either qemu-user-static emulation or a hand-rolled system-tclsh setup
+    (build Pgtcl from source, vendor a missing ticklecharts module, etc.) —
+    not worth the complexity for now.
+    """
+    if not needed:
+        return
+
+    target = script_dir / "hammerdb"
+    if not force and (target / "hammerdbcli").is_file():
+        log.info("Reusing existing HammerDB at %s", target)
+        return
+
+    arch = detect_go_arch()
+    if arch != "amd64":
+        raise BenchError(
+            f"HammerDB integration currently supports amd64 only "
+            f"(detected: {arch}). Run --tests tpcc_hdb on an x86_64 host, "
+            f"or drop tpcc_hdb from --tests."
+        )
+
+    with stage(f"install hammerdb {hammerdb_version}"):
+        tarball_name = f"HammerDB-{hammerdb_version}-Linux.tar.gz"
+        tarball = script_dir / tarball_name
+        run(["wget", "-q", hammerdb_binary_url, "-O", str(tarball)],
+            cwd=script_dir)
+        if target.exists():
+            remove_dir(target)
+        run(["tar", "-xzf", str(tarball), "-C", str(script_dir)])
+        extracted = script_dir / f"HammerDB-{hammerdb_version}"
+        if not extracted.is_dir():
+            raise BenchError(
+                f"After extraction, expected {extracted} — tarball layout "
+                f"changed?"
+            )
+        extracted.rename(target)
+        try:
+            tarball.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def build_go_tpc(*, force: bool) -> None:
     go_tpc_dir = script_dir / "go-tpc"
     binary = go_tpc_dir / "bin" / "go-tpc"
@@ -460,8 +523,12 @@ def mount_nvme() -> None:
 
 def setup_test_environment(args: argparse.Namespace) -> None:
     with stage("prepare environment"):
-        install_go(force=args.reinitialize)
-        build_go_tpc(force=args.reinitialize)
+        need_go_tpc = "tpcc" in args.tests
+        need_hammerdb = "tpcc_hdb" in args.tests
+        if need_go_tpc:
+            install_go(force=args.reinitialize)
+            build_go_tpc(force=args.reinitialize)
+        install_hammerdb(force=args.reinitialize, needed=need_hammerdb)
 
         run(["sudo", "mkdir", "-p", str(args.pgdata_base)])
         if args.nvme:
@@ -509,6 +576,17 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
             cli += ["--warehouses", *(str(w) for w in args.warehouses)]
         if args.tpcc_conns:
             cli += ["--conns", *(str(c) for c in args.tpcc_conns)]
+    elif test_name == "tpcc_hdb":
+        if args.warehouses:
+            cli += ["--warehouses", *(str(w) for w in args.warehouses)]
+        if args.tpcc_conns:
+            cli += ["--vu", *(str(c) for c in args.tpcc_conns)]
+        cli += [
+            "--hammerdb", str(script_dir / "hammerdb"),
+            "--rampup-min", str(args.hdb_rampup_min),
+            "--duration-min", str(args.hdb_duration_min),
+            "--build-vu", str(args.hdb_build_vu),
+        ]
     elif test_name == "ibench":
         if args.ibench_scale_mul is not None:
             cli += ["--scale-mul", str(args.ibench_scale_mul)]

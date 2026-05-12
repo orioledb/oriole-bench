@@ -36,7 +36,7 @@ default_pgdata_base = Path("/ssd")
 log_dir = script_dir / "log"
 
 valid_engines = ("orioledb", "heap")
-valid_tests = ("pgbench", "tpcc", "ibench")
+valid_tests = ("pgbench", "tpcc", "tpcc_hdb", "ibench")
 
 conf_files_required_for_tests = {
     "pgbench": [
@@ -51,6 +51,11 @@ conf_files_required_for_tests = {
         "postgresql.auto.conf.tpcc",
         "postgresql.auto.conf.orioledb.tpcc",
         "postgresql.auto.conf.heap.tpcc",
+    ],
+    "tpcc_hdb": [
+        "postgresql.auto.conf.tpcc_hdb",
+        "postgresql.auto.conf.orioledb.tpcc_hdb",
+        "postgresql.auto.conf.heap.tpcc_hdb",
     ],
     "ibench": [
         "postgresql.auto.conf.ibench",
