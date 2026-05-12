@@ -48,7 +48,7 @@ from common import (
 )
 
 
-go_version = "1.23.5"
+go_version = "1.25.0"
 
 oriole_repo = "https://github.com/orioledb/orioledb"
 postgres_oriole_repo = "https://github.com/orioledb/postgres"
