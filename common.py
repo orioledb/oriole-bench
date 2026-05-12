@@ -263,6 +263,17 @@ def run(
     banner = f"$ {_format_cmd(cmd)}" + (f"  (cwd={cwd_str})" if cwd_str else "") + "\n"
     _append_log(target, banner)
 
+    # Detach background subprocesses from our controlling tty: a Ctrl+Z in the
+    # parent's screen/ssh session would otherwise SIGTSTP the whole group
+    # (tests.py + sudo + apt-get + ...) and freeze the bench mid-step.
+    # When the caller passes `input_text`, subprocess.run wires up its own
+    # stdin pipe, so we leave stdin alone.
+    detach_kwargs: dict = {}
+    if not inherit_io:
+        detach_kwargs["start_new_session"] = True
+        if input_text is None:
+            detach_kwargs["stdin"] = subprocess.DEVNULL
+
     try:
         if inherit_io:
             proc = subprocess.run(
@@ -277,6 +288,7 @@ def run(
                 env=({**os.environ, **env} if env is not None else None),
                 check=False, capture_output=True, text=text,
                 shell=shell, input=input_text, timeout=timeout,
+                **detach_kwargs,
             )
             tail_parts = []
             if proc.stdout:
@@ -296,6 +308,7 @@ def run(
                     env=({**os.environ, **env} if env is not None else None),
                     check=False, stdout=f, stderr=subprocess.STDOUT, text=text,
                     shell=shell, input=input_text, timeout=timeout,
+                    **detach_kwargs,
                 )
     except FileNotFoundError as e:
         raise BenchError(
@@ -359,10 +372,12 @@ def run_bg(
         cmd_for_run,
         cwd=str(cwd) if cwd is not None else None,
         env=({**os.environ, **env} if env is not None else None),
+        stdin=subprocess.DEVNULL,
         stdout=stdout,
         stderr=stderr,
         shell=shell,
         text=True,
+        start_new_session=True,
     )
     proc._log_fh = log_fh  # type: ignore[attr-defined]
     proc._log_path = log_path  # type: ignore[attr-defined]
