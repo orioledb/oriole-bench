@@ -259,6 +259,8 @@ diset tpcc pg_total_iterations 10000000
 diset tpcc pg_storedprocs true
 diset tpcc pg_allwarehouse true
 diset tpcc pg_raiseerror true
+diset tpcc pg_user_delay 5
+diset tpcc pg_repeat_delay 0
 loadscript
 vuset vu {vu}
 vucreate
