@@ -1,99 +1,250 @@
-# Oriole-bench: automated benchmarking for Postgres and OrioleDB
+# oriole-bench: automated benchmarking for Postgres and OrioleDB
 
-Benchmark is designed to run machines with big number of cores and RAM e.g. AWS c7g/c7gd Runing the test
-Mainly for internal usage. Use at your own risk.
+Drives end-to-end PG / OrioleDB benchmarks: bootstraps system + Python
+dependencies on a fresh Ubuntu VM, clones and builds the requested PG and
+OrioleDB refs, sets up the bench tools (`go-tpc`, optionally `HammerDB` and
+`mdcallag/iibench`), and runs `pgbench` / TPC-C (go-tpc) / TPC-C
+(HammerDB, stored-procedure mode) / `ibench`. Designed for large AWS
+instances (c7g/c7gd-class). Mainly for internal use — use at your own risk.
 
-## Simple usage
+## What's where
 
-```
-git checkout https://github.com/pashkinelfe/oriole-bench.git
+| File | Purpose |
+|---|---|
+| `tests.py` | Top-level orchestrator: bootstrap → build → prepare env → run tests |
+| `test_pgbench.py` | Pgbench driver (select / select_any / tpc-b / tpc-b procedure) |
+| `test_tpcc.py` | TPC-C driver via `go-tpc` (per-statement mode) |
+| `test_tpcc_hdb.py` | TPC-C driver via HammerDB in **stored-procedure mode** |
+| `test_ibench.py`, `run_ibench.py`, `report_ibench.py` | mdcallag ibench multi-phase workflow |
+| `common.py` | Shared utilities: `run()` wrapper, stage / log routing, `ResourceMonitor`, preflight, bootstrap |
+| `aggregate_resources.py` | Summarises ResourceMonitor JSONL files (means, growth, wait events) |
+| `postgresql.auto.conf.*` | Per-test, per-engine PG configs that are concatenated into the live `postgresql.auto.conf` |
+| `orioledb-*.sql` | pgbench script files (`select_any9/30/50`, `tpc-b-procedure`, prepare function) |
+
+## Quick start
+
+```bash
+git clone https://github.com/orioledb/oriole-bench.git
 cd oriole-bench
-ORIOLE_ID="{list of orioledb commits}" PG_ID="{list of pg commits}" ./tests.sh
+
+# Compare two postgres-master refs and one orioledb build, all suites,
+# using the local NVMe disk for pgdata:
+./tests.py --oriole-id beta15 --pg-id REL_17_8 master \
+           --tests pgbench tpcc ibench \
+           --nvme --extended-logging
 ```
 
-```{list of orioledb commits}``` - a list of oriole commit hashes, tags or branch names to be compared in tests
+At least one of `--oriole-id` / `--pg-id` must be given.
 
-```{list of pg commits}``` (optional) - list of PG commit hashes, tags or branch names to be compared in tests
+Result files land in `./results/<engine>-<patch_id>-<test>[-<suffix>]`. Each
+file starts with a timestamp header and is appended (not overwritten) on
+re-runs. Per-second resource samples — when `--extended-logging` is on —
+live in `./results/<engine>-<patch_id>-<test>-resources/<...>.jsonl`. Use
+`./aggregate_resources.py 'results/*-tpcc-resources/*.jsonl' --format csv`
+to roll them up.
 
-Result files would be like: ```./results/<orioledb/heap>-<commit hash/tag>-<test-name>-<optional params>```
+Subprocess noise (apt, pip, configure, make, pgbench, go-tpc, HammerDB,
+ibench workers) goes into `./log/<stage>.log`. The console only sees
+high-level stage transitions (`→ start`, `✓ ok (Xs)`, `✖ failed`). On
+failure, the BenchError message includes the path to the relevant log.
 
-Each result file contains timestamp then test results. Repeated test runs appended to the file with their actual timestamps.
+## Top-level flags
 
-## Advanced options
-```FAST_RUN=1``` Run fast tests for debug. Not recommended for actual measurements
+```
+--oriole-id REF [REF ...]   OrioleDB tags / commits / branches to compare
+--pg-id REF [REF ...]       Postgres tags / commits / branches to compare
+--tests TEST [TEST ...]     pgbench | tpcc | tpcc_hdb | ibench (default: all four)
+--fast-run                  Short benchmark runs (for debug, not real measurements)
+--nvme                      Format and mount the local NVMe device on /ssd
+                            (compatible with c7gd layout; skipped automatically
+                             if /ssd is already a mount point)
+--memory-buffers VAL        Override shared_buffers / orioledb.main_buffers
+--results-dir PATH          Where result files are written (default ./results)
+--pgdata-base PATH          Parent dir for per-test PGDATA directories
+                            (default /ssd; per-test dirs encode engine + patch_id
+                             + test + scale, so they coexist on the same volume)
 
-```NVME=1``` Create and mount NVME volume and use it as ```pgdata``` destination for tests.
-This is compatible with volumes layout of c7gd instances. Don't run on EBS-only instances.
+Behavior:
+--reinitialize              Discard cached repos, go-tpc, HammerDB and pg builds
+                            and rebuild from scratch. Default reuses everything.
+--reuse-data                Reuse the per-test PGDATA dirs that already have a
+                            valid cluster — skip initdb and the data-load step.
+--skip-bootstrap            Don't run apt-get / pip install (use when the VM is
+                            already provisioned).
+--extended-logging          Sample CPU / disk IO / wait events once per second to
+                            a JSONL file alongside each measurement.
+```
 
-```TESTS_LIST="{list of tests to run}"``` (optional) list of test suites to run from ```tpcc```, ```pgbench```, ```ibench```. When not specified all will run.
+Per-suite groups (see `./tests.py --help` for the full list):
 
-```MEMORY_BUFFERS="{buffers value}"``` Set customized value of ```shared_buffers```/```orioledb.main_buffers``` for heap/orioledb tests. 
+* **pgbench**: `--precise-pgbench`, `--pgbench-conns`, `--pgbench-tests`
+* **tpcc** (go-tpc): `--linear-scale`, `--init-point`, `--warehouses`,
+  `--tpcc-conns`
+* **tpcc_hdb** (HammerDB): `--hdb-rampup-min`, `--hdb-duration-min`,
+  `--hdb-build-vu`. Shares `--warehouses` and `--tpcc-conns` (= virtual
+  users) with the go-tpc suite.
+* **ibench**: `--ibench-scale-mul`, `--ibench-path`, `--ibench-conns`
 
-### Pgbench-based tests
+## Per-suite notes
 
-* Recommended options for beautiful, more repeatable but slower results:
+### pgbench
 
-```PRECISE_PGBENCH=1``` - Gather more points for smooth and beautiful connections plot. Takes more time
+Schema is loaded once with `pgbench -i -s1000`. Subtests:
+`select` (built-in `-S`), `select_any9 / select_any30 / select_any50` (random
+multi-row lookups using `orioledb-select-{9,30,50}.sql`), `tpcb` (built-in
+write workload), `tpcb_procedure` (TPC-B logic wrapped in a PL/pgSQL
+procedure via `orioledb-tpcb-in-procedure.sql`). Default per-subtest run
+time: 30s. `--fast-run` cuts that to 5s.
 
-* Advanced options:
+### TPC-C via go-tpc
 
-```PGBENCH_CONNS``` (optional) - List of connections to run test on. This overrides setting of ```$PRECISE_PGBENCH```.
+Statement-mode TPC-C. Sweep over `--warehouses × --tpcc-conns`. Per
+warehouses value, `go-tpc tpcc prepare` is run once, then go-tpc gets a
+fresh `run` for each connection count (or per-point if `--init-point`).
+Default measurement: 100s; `--fast-run`: 5s.
 
-```PGBENCH_TESTS_LIST="{list of pgbench tests to run}"``` (optional) list of pgbench tests to run from ```select```, ```select_any```, ```tpcb```, ```tpcb_procedure```. When not specified all tests will run.
+### TPC-C via HammerDB (stored-procedure mode)
 
-### Tpc-c test
+Same sweep, but HammerDB BUILD creates five PL/pgSQL procedures
+(`neword / payment / delivery / slev / ostat`) and virtual users call
+them server-side via `SELECT neword(...)` etc. Substantially fewer
+round-trips than go-tpc, surfacing pure engine throughput rather than
+driver/protocol overhead.
 
-* Recommended options for beautiful, more repeatable but slower results:
+* **amd64 only** for now (HammerDB ships an x86_64 binary; arm64 source
+  build via Bawt is non-trivial because their bundled tclkit is x86_64).
+  On arm64 the suite exits with a clear error pointing this out.
+* On `engine=orioledb`, we `CREATE EXTENSION orioledb` in `template1`
+  before HammerDB BUILDs, so the fresh `tpcc` database it creates
+  inherits the extension; `default_table_access_method=orioledb` then
+  takes care of every CREATE TABLE.
+* Default rampup = 2 min, duration = 5 min per `(warehouses, vu)` point.
+* HammerDB's BUILD with INSERT-per-row is much slower than go-tpc's bulk
+  COPY — for 1000 warehouses on a c7gd-class host expect 1-2 hours per
+  engine just for BUILD. Use `--reuse-data` on subsequent runs.
 
-```LINEAR_SCALE=1``` - Connections are on linear scale.
+### ibench
 
-```INIT_POINT=1``` - Init database before each point not before each series. More repeatable at large scales due to the same OS file buffers state before each measurement
+Multi-phase write-heavy workload (`l.i0 → l.ix → l.i1 → l.i2 → qr100.L1 →
+qr100.L2 → qr500.L3 → qr500.L4 → qr1000.L5 → qr1000.L6`). Each phase runs
+`--ibench-conns` (default 20) parallel `iibench.py` workers and the result
+row records `(test_name, du sizes for pgdata/pg_wal/orioledb_data/orioledb_undo,
+elapsed, checkpoint time)`. Scale multiplier is 100 by default (a lot of
+data — needs around 200 GB pgdata and several hours per engine), or 1 if
+`--fast-run` is on. Requires
+`mdcallag-tools/bench/ibench/iibench.py` (path tunable via `--ibench-path`).
 
-* Advanced options:
+## Per-test PGDATA naming and reuse
 
-```$WAREHOUSES``` (optional) - List of numbers of warehouses to run test on
+Each test allocates its own data directory under `--pgdata-base`, named:
 
-```TPCC_CONNS``` (optional) - List of connections to run test on. This overrides setting of ```$LINEAR_SCALE```.
+```
+pgdata-<engine>-<sanitized-patch_id>-<test>-<scale>
+```
 
-### Ibench tests
+— e.g. `pgdata-orioledb-beta15-tpcc_hdb-w1000`. Includes the patch_id so
+two builds never silently share an on-disk cluster (their file formats
+may differ). `--reuse-data` checks for `PG_VERSION` in that directory and
+skips initdb + data load when present.
 
-```IBENCH_SCALE_MUL``` - Custom scale value. Default is 100. Overrides ```FAST_RUN``` option.
+## Build artifact reuse
+
+By default `tests.py` only does what isn't already cached:
+
+* Git checkouts (`orioledb/`, `postgres-oriole/`, `postgres-master/`,
+  `go-tpc/`, `hammerdb-src/`) are reused — `git fetch` then `git checkout`
+  the requested ref.
+* PG builds in `pgbin/<ref>/` are reused if `pgbin/<ref>/bin/pg_ctl`
+  exists.
+* The `go-tpc` binary and the HammerDB tarball are reused if already
+  installed.
+
+Pass `--reinitialize` to blow these away and rebuild from scratch.
 
 ## Examples
 
-Run all tests with default config:
-```
-ORIOLE_ID="main beta9 f55152254" PG_ID="master" ./tests.sh
-```
-
-Run only ```tpcc``` and ```pgbench``` tests with ```shared_buffers```/```orioledb.main_buffers``` to 100GB for heap/orioledb tests. Use settings for beautiful repeatable and slower results in ```tpcc``` test. Within ```pgbench``` test run only ```select_any``` and ```tpcb_procedure``` tests on 10, 50 and 100 connections only:
-
-```
-ORIOLE_ID="main beta9 f55152254" PG_ID="master" MEMORY_BUFFERS='100GB' INIT_POINT=1 LINEAR_SCALE=1 TESTS_LISI="pgbench tpcc" PGBENCH_TESTS_LIST="select_any tpcb_procedure" PGBENCH_CONNS="10 50 100" ./tests.sh
+All tests on a fresh c7gd VM, comparing one orioledb tag and two PG refs:
+```bash
+./tests.py --oriole-id beta15 --pg-id REL_17_8 master \
+           --nvme --extended-logging
 ```
 
-This will perform all tests with default options on the current ```master``` branch of PG and on three states of OrioleDB: branch ```main```, tag ```beta9```, commit ```f55152254```.
+Pure-PG comparison (no `--oriole-id`):
+```bash
+./tests.py --pg-id REL_17_8 master --tests pgbench tpcc \
+           --memory-buffers 100GB --nvme
+```
 
-## Limitations
+TPC-C via HammerDB only, single warehouse value, custom VU sweep,
+short measurements:
+```bash
+./tests.py --oriole-id beta15 --pg-id REL_17_8 --tests tpcc_hdb \
+           --warehouses 1000 --tpcc-conns 330 100 33 10 \
+           --hdb-rampup-min 1 --hdb-duration-min 3 \
+           --extended-logging --nvme --reuse-data
+```
 
-### Tpc-c test
+Pgbench sweep on connections 10/50/100, only the most read/write-mixed
+subtests, 100GB buffers:
+```bash
+./tests.py --oriole-id main --pg-id master --tests pgbench \
+           --memory-buffers 100GB \
+           --pgbench-tests select_any9 tpcb_procedure \
+           --pgbench-conns 10 50 100
+```
 
-With default options ```pgdata``` will need around 80Gb
+## Resource monitoring
 
-### Ibench test
+`--extended-logging` enables per-second sampling via `psutil` and
+`psycopg2`, modeled on `orioledb/ci/pgbench.py:run_pgbench`. Each sample
+is a JSON line with:
 
-With default options ```pgdata``` will need around 200Gb. Each test for Orioledb takes 4-5 hours, for PG 15 hours
+```
+time, disk_used, system, user, idle (CPU %),
+read_count, write_count, read_bytes, write_bytes (disk IO delta/s),
+waits  (jsonb_object_agg of wait_event counts from pg_stat_activity),
+lsn    (pg_current_wal_lsn as 'X/Y' hex)
+```
 
-Setting ```MEMORY_BUFFERS``` similar to ```tpcc``` and ```pgbench``` tests might be low for this test. It's recommended
-to leave default values.
+If psycopg2 isn't installed or PG can't be reached transiently (e.g. the
+monitor opens during PG restart), the sampler keeps writing CPU/IO/disk
+fields with `waits = lsn = null`; it retries the PG connection every 5s.
 
-## Caveats
+Aggregate with `aggregate_resources.py`:
+```bash
+./aggregate_resources.py 'results/*-tpcc-resources/*.jsonl' \
+                         --format csv --out tpcc-summary.csv
+```
+Means for everything, last-value + average growth bytes/sec for
+`disk_used` and `lsn`.
 
-- Benchmarks parameters are chosen for quite heavy instances like c7g. For running on smaller machines PG config parameters and test scales may need to be modified. 
-- Error processing is far from being full. If you get something unexpected - report.
-- Ibench test detaches several runners, kill them all if stopping test before it finishes.
+## Disk requirements
 
-## Acknowlegements to
+| Suite | Default scale | Pgdata size |
+|---|---|---|
+| pgbench | s=1000 | ~16 GB |
+| tpcc (go-tpc) | 470 / 220 / 100 / 47 / 22 / 10 / 5 warehouses, separate dir each | up to ~80 GB for the biggest |
+| tpcc_hdb | similar | similar |
+| ibench | scale_mul = 100 | ~200 GB |
 
-Mark Callagan <https://github.com/mdcallag> for ibench tests repo
+Multiple PGDATA dirs coexist when you sweep over warehouses or run
+multiple `(engine, patch_id)` combinations — plan storage accordingly,
+or sequence runs with `--reinitialize` to recycle.
 
+## Limitations and caveats
+
+* HammerDB suite (`tpcc_hdb`) is **amd64 only**.
+* Defaults assume heavy hosts (lots of cores and RAM). On smaller
+  machines tune `--memory-buffers`, `--warehouses`, `--tpcc-conns`,
+  `--ibench-scale-mul`, the run-times, etc.
+* `--nvme` runs `parted` / `mkfs.ext4` on the local NVMe device — only
+  use on instances where you actually want a fresh filesystem there.
+* `ibench` runs many parallel workers. If you kill `tests.py` mid-run,
+  check for and kill any leftover `python3 iibench.py` processes.
+* `--reuse-data` trusts that the existing PGDATA has the schema the test
+  expects. After a failed data-load run, drop `--reuse-data` once so
+  `tests.py` rebuilds.
+
+## Acknowledgements
+
+Mark Callaghan <https://github.com/mdcallag> for the ibench tests repo.
