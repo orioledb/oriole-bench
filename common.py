@@ -655,16 +655,22 @@ def apt_install(packages: Sequence[str]) -> None:
     #                                     dialog (Ubuntu 22.04+).
     #   UCF_FORCE_CONFFOLD=YES          — ucf keeps the on-disk config silently.
     #   DEBCONF_NOWARNINGS=yes          — suppress debconf warnings.
-    env = {
-        "DEBIAN_FRONTEND": "noninteractive",
-        "DEBIAN_PRIORITY": "critical",
-        "APT_LISTCHANGES_FRONTEND": "none",
-        "APT_LISTBUGS_FRONTEND": "none",
-        "NEEDRESTART_MODE": "a",
-        "NEEDRESTART_SUSPEND": "1",
-        "UCF_FORCE_CONFFOLD": "YES",
-        "DEBCONF_NOWARNINGS": "yes",
-    }
+    #
+    # We push these in via `sudo env VAR=val ...` rather than `sudo -E`,
+    # because many sudoers configs refuse -E ("preserving the entire
+    # environment is not supported, '-E' is ignored") and silently strip
+    # our env, which lets apt fall back to its interactive frontend and
+    # hang on the needrestart/listchanges dialog.
+    env_pairs = [
+        "DEBIAN_FRONTEND=noninteractive",
+        "DEBIAN_PRIORITY=critical",
+        "APT_LISTCHANGES_FRONTEND=none",
+        "APT_LISTBUGS_FRONTEND=none",
+        "NEEDRESTART_MODE=a",
+        "NEEDRESTART_SUSPEND=1",
+        "UCF_FORCE_CONFFOLD=YES",
+        "DEBCONF_NOWARNINGS=yes",
+    ]
     # -o Dpkg::Options::=--force-confold|--force-confdef keeps existing config
     # files on conflict instead of asking; Dpkg::Use-Pty=0 disables the pty UI.
     # --no-install-recommends shrinks the install set so we don't drag in
@@ -675,9 +681,9 @@ def apt_install(packages: Sequence[str]) -> None:
         "-o", "Dpkg::Options::=--force-confold",
         "-o", "Dpkg::Use-Pty=0",
     ]
-    # `sudo -E` preserves the DEBIAN_FRONTEND etc. env across sudo's filter.
-    run(["sudo", "-E", "apt-get", "update", *apt_opts], env=env)
-    run(["sudo", "-E", "apt-get", "install", *apt_opts, *packages], env=env)
+    sudo_env = ["sudo", "env", *env_pairs]
+    run([*sudo_env, "apt-get", "update", *apt_opts])
+    run([*sudo_env, "apt-get", "install", *apt_opts, *packages])
 
 
 def pip_install(packages: Sequence[str]) -> None:
