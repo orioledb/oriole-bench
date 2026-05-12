@@ -4,7 +4,6 @@ wal_sync_method = fdatasync             # the default is the first option
 wal_level='replica'                     # to log what replication needs
 full_page_writes = on                   # recover from partial page writes
 track_io_timing = on
-synchronous_commit = off                # synchronization level;
 bgwriter_lru_maxpages =  5000           # max buffers written/round, 0 disables
 bgwriter_delay = 100ms                  # 10-10000ms between rounds
 wal_compression = off

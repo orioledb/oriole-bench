@@ -137,6 +137,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="orioledb.undo_buffers value (orioledb engine only).",
     )
     p.add_argument(
+        "--fsync", choices=("on", "off"), default="off",
+        help="postgresql.conf 'fsync' value.",
+    )
+    p.add_argument(
+        "--synchronous-commit", choices=("on", "off"), default="off",
+        help="postgresql.conf 'synchronous_commit' value.",
+    )
+    p.add_argument(
         "--results-dir", type=Path, default=default_results_dir,
         help="Where result files are written.",
     )
@@ -603,6 +611,8 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
         cli += ["--memory-buffers", args.memory_buffers]
     if args.undo_buffers is not None:
         cli += ["--undo-buffers", args.undo_buffers]
+    cli += ["--fsync", args.fsync,
+            "--synchronous-commit", args.synchronous_commit]
     if args.fast_run:
         cli.append("--fast-run")
     if args.reuse_data:

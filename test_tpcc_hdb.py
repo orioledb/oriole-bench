@@ -132,7 +132,8 @@ def preflight(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
-                    undo_buffers: str, reuse_data: bool) -> bool:
+                    undo_buffers: str, fsync: str, synchronous_commit: str,
+                    reuse_data: bool) -> bool:
     """
     Init/reuse PGDATA. Returns True if HammerDB BUILD still needs to run.
 
@@ -140,10 +141,12 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
     database that HammerDB CREATE-DATABASE's later automatically inherits it
     (HammerDB itself doesn't know about orioledb).
     """
+    cfg_args = dict(memory_buffers=memory_buffers, undo_buffers=undo_buffers,
+                    fsync=fsync, synchronous_commit=synchronous_commit)
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
             stop_pg_silent(pgdatadir)
-            write_engine_config(pgdatadir, engine, "tpcc_hdb", memory_buffers, undo_buffers)
+            write_engine_config(pgdatadir, engine, "tpcc_hdb", **cfg_args)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
         return False
@@ -156,7 +159,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
         time.sleep(5)
         pg_initdb(pgdatadir)
         pg_start(pgdatadir)
-        write_engine_config(pgdatadir, engine, "tpcc_hdb", memory_buffers)
+        write_engine_config(pgdatadir, engine, "tpcc_hdb", **cfg_args)
         if engine == "orioledb":
             # Install the extension into template1 so the database HammerDB
             # creates inherits it. We restart afterwards to pick up
@@ -346,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         with stage(f"warehouses {w}"):
             needs_build = prepare_cluster(pgdatadir, args.engine,
                                           memory_buffers, args.undo_buffers,
+                                          args.fsync, args.synchronous_commit,
                                           args.reuse_data)
             if needs_build:
                 hdb_build(hammerdb=args.hammerdb, warehouses=w,

@@ -535,6 +535,14 @@ def add_common_test_args(parser: argparse.ArgumentParser) -> None:
         help="orioledb.undo_buffers value (orioledb engine only).",
     )
     parser.add_argument(
+        "--fsync", choices=("on", "off"), default="off",
+        help="postgresql.conf 'fsync' value.",
+    )
+    parser.add_argument(
+        "--synchronous-commit", choices=("on", "off"), default="off",
+        help="postgresql.conf 'synchronous_commit' value.",
+    )
+    parser.add_argument(
         "--fast-run", action="store_true",
         help="Short benchmark runs (debug only).",
     )
@@ -815,6 +823,8 @@ def write_engine_config(
     test: str,
     memory_buffers: str,
     undo_buffers: str = "1GB",
+    fsync: str = "off",
+    synchronous_commit: str = "off",
 ) -> None:
     """Write postgresql.auto.conf for the given engine + test."""
     auto_conf = pgdatadir / "postgresql.auto.conf"
@@ -822,6 +832,11 @@ def write_engine_config(
     if not base.is_file():
         raise BenchError(f"Base config not found: {base}")
     shutil.copyfile(base, auto_conf)
+
+    # Durability knobs are caller-controlled so they can be swept like any
+    # other variable. Default to off (the historical bench preset).
+    append_line(auto_conf, f"fsync = {fsync}")
+    append_line(auto_conf, f"synchronous_commit = {synchronous_commit}")
 
     if engine == "orioledb":
         engine_conf = script_dir / f"postgresql.auto.conf.orioledb.{test}"

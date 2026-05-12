@@ -89,13 +89,16 @@ def preflight(args: argparse.Namespace) -> None:
 
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
-                    undo_buffers: str, warehouses: int, go_tpc: Path,
+                    undo_buffers: str, fsync: str, synchronous_commit: str,
+                    warehouses: int, go_tpc: Path,
                     reuse_data: bool) -> bool:
     """Init/reuse PGDATA and run go-tpc prepare. Returns True if data was loaded."""
+    cfg_args = dict(memory_buffers=memory_buffers, undo_buffers=undo_buffers,
+                    fsync=fsync, synchronous_commit=synchronous_commit)
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
             stop_pg_silent(pgdatadir)
-            write_engine_config(pgdatadir, engine, "tpcc", memory_buffers, undo_buffers)
+            write_engine_config(pgdatadir, engine, "tpcc", **cfg_args)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
         return False
@@ -109,7 +112,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
         pg_initdb(pgdatadir)
         pg_start(pgdatadir)
 
-        write_engine_config(pgdatadir, engine, "tpcc", memory_buffers, undo_buffers)
+        write_engine_config(pgdatadir, engine, "tpcc", **cfg_args)
         if engine == "orioledb":
             pg_psql("create extension orioledb;")
         pg_restart(pgdatadir)
@@ -194,13 +197,15 @@ def main(argv: list[str] | None = None) -> int:
         with stage(f"warehouses {w}"):
             if not args.init_point:
                 prepare_cluster(pgdatadir, args.engine, memory_buffers,
-                                args.undo_buffers, w, args.go_tpc,
+                                args.undo_buffers, args.fsync,
+                                args.synchronous_commit, w, args.go_tpc,
                                 args.reuse_data)
 
             for a in conns_list:
                 if args.init_point:
                     prepare_cluster(pgdatadir, args.engine, memory_buffers,
-                                    args.undo_buffers, w, args.go_tpc,
+                                    args.undo_buffers, args.fsync,
+                                    args.synchronous_commit, w, args.go_tpc,
                                     reuse_data=False)
 
                 append_text(result_file, f"{w},{a},")

@@ -76,11 +76,14 @@ def preflight(args: argparse.Namespace) -> None:
 
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
-                    undo_buffers: str, reuse_data: bool) -> None:
+                    undo_buffers: str, fsync: str, synchronous_commit: str,
+                    reuse_data: bool) -> None:
     stop_pg_silent(pgdatadir)
+    cfg_args = dict(memory_buffers=memory_buffers, undo_buffers=undo_buffers,
+                    fsync=fsync, synchronous_commit=synchronous_commit)
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
-            write_engine_config(pgdatadir, engine, "ibench", memory_buffers, undo_buffers)
+            write_engine_config(pgdatadir, engine, "ibench", **cfg_args)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
         return
@@ -90,7 +93,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
         ensure_dir(pgdatadir.parent)
         pg_initdb(pgdatadir)
         pg_start(pgdatadir)
-        write_engine_config(pgdatadir, engine, "ibench", memory_buffers)
+        write_engine_config(pgdatadir, engine, "ibench", **cfg_args)
         if engine == "orioledb":
             pg_psql("create extension orioledb;")
         pg_restart(pgdatadir)
@@ -111,7 +114,8 @@ def main(argv: list[str] | None = None) -> int:
                              patch_id=args.patch_id,
                              test="ibench", scale=f"scale{scale_mul}")
     prepare_cluster(pgdatadir, args.engine, memory_buffers,
-                    args.undo_buffers, args.reuse_data)
+                    args.undo_buffers, args.fsync, args.synchronous_commit,
+                    args.reuse_data)
 
     ensure_dir(args.results_dir)
     result_file = args.results_dir / f"{args.engine}-{args.patch_id}-ibench-scale{scale_mul}"

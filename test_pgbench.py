@@ -107,16 +107,19 @@ def preflight(args: argparse.Namespace) -> None:
 
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
-                    undo_buffers: str, reuse_data: bool) -> bool:
+                    undo_buffers: str, fsync: str, synchronous_commit: str,
+                    reuse_data: bool) -> bool:
     """
     Initialize (or reuse) and start the PG cluster. Returns True if data needs
     to be (re)loaded with `pgbench -i`.
     """
     stop_pg_silent(pgdatadir)
+    cfg_args = dict(memory_buffers=memory_buffers, undo_buffers=undo_buffers,
+                    fsync=fsync, synchronous_commit=synchronous_commit)
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
             ensure_dir(pgdatadir)
-            write_engine_config(pgdatadir, engine, "pgbench", memory_buffers, undo_buffers)
+            write_engine_config(pgdatadir, engine, "pgbench", **cfg_args)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
         return False
@@ -126,7 +129,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
         ensure_dir(pgdatadir.parent)
         pg_initdb(pgdatadir)
         pg_start(pgdatadir)
-        write_engine_config(pgdatadir, engine, "pgbench", memory_buffers)
+        write_engine_config(pgdatadir, engine, "pgbench", **cfg_args)
         if engine == "orioledb":
             pg_psql("create extension orioledb;")
         pg_restart(pgdatadir)
@@ -173,7 +176,8 @@ def main(argv: list[str] | None = None) -> int:
                              patch_id=args.patch_id,
                              test="pgbench", scale=f"s{pgbench_scale}")
     needs_load = prepare_cluster(pgdatadir, args.engine, memory_buffers,
-                                 args.undo_buffers, args.reuse_data)
+                                 args.undo_buffers, args.fsync,
+                                 args.synchronous_commit, args.reuse_data)
     if needs_load:
         with stage(f"load pgbench s={pgbench_scale}"):
             run(["pgbench", "postgres", "-i", f"-s{pgbench_scale}"])

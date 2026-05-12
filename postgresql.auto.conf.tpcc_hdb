@@ -1,6 +1,4 @@
 statement_timeout = 0
-synchronous_commit = off
-fsync = off
 max_connections = 700
 max_worker_processes = 50
 max_parallel_workers = 50
