@@ -640,22 +640,32 @@ def detect_debian_family() -> bool:
 def apt_install(packages: Sequence[str]) -> None:
     if not packages:
         return
-    # DEBIAN_FRONTEND=noninteractive   silences debconf prompts.
-    # DEBIAN_PRIORITY=critical         only ask on truly critical questions.
-    # NEEDRESTART_MODE=a               auto-restart services without the
-    #                                  curses 'Daemons using outdated libs' UI
-    #                                  that ships on Ubuntu 22.04+.
-    # NEEDRESTART_SUSPEND=1            backstop in case needrestart still tries.
+    # Belt-and-suspenders to keep apt fully non-interactive on a fresh VM.
+    #   DEBIAN_FRONTEND=noninteractive  — silence debconf prompts.
+    #   DEBIAN_PRIORITY=critical        — only ask on truly critical things.
+    #   APT_LISTCHANGES_FRONTEND=none   — don't open the changelog pager.
+    #   APT_LISTBUGS_FRONTEND=none      — don't open the bug-list pager.
+    #   NEEDRESTART_MODE=a /            — auto-restart services without the
+    #     NEEDRESTART_SUSPEND=1           curses 'Daemons using outdated libs'
+    #                                     dialog (Ubuntu 22.04+).
+    #   UCF_FORCE_CONFFOLD=YES          — ucf keeps the on-disk config silently.
+    #   DEBCONF_NOWARNINGS=yes          — suppress debconf warnings.
     env = {
         "DEBIAN_FRONTEND": "noninteractive",
         "DEBIAN_PRIORITY": "critical",
+        "APT_LISTCHANGES_FRONTEND": "none",
+        "APT_LISTBUGS_FRONTEND": "none",
         "NEEDRESTART_MODE": "a",
         "NEEDRESTART_SUSPEND": "1",
+        "UCF_FORCE_CONFFOLD": "YES",
+        "DEBCONF_NOWARNINGS": "yes",
     }
     # -o Dpkg::Options::=--force-confold|--force-confdef keeps existing config
     # files on conflict instead of asking; Dpkg::Use-Pty=0 disables the pty UI.
+    # --no-install-recommends shrinks the install set so we don't drag in
+    # packages with their own post-install prompts.
     apt_opts = [
-        "-y", "-q",
+        "-y", "-qq", "--no-install-recommends",
         "-o", "Dpkg::Options::=--force-confdef",
         "-o", "Dpkg::Options::=--force-confold",
         "-o", "Dpkg::Use-Pty=0",
