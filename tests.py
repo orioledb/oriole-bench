@@ -178,12 +178,21 @@ def preflight(args: argparse.Namespace) -> None:
     if not args.oriole_id and not args.pg_id:
         pf.err("At least one of --oriole-id / --pg-id must be set.")
 
-    required_bins = ["git", "make", "sudo", "chmod", "rm", "mkdir"]
-    for b in required_bins:
-        pf.require_binary(b)
-    if args.nvme:
-        for b in ("parted", "mkfs.ext4", "mount"):
+    # `sudo` is invoked by every code path (bootstrap, /ssd setup, NVMe
+    # mount), so it has to exist before we do anything.
+    pf.require_binary("sudo")
+
+    # Bootstrap installs git/make/wget/tar/python3/pip3/parted/etc. via apt.
+    # When the user opts out with --skip-bootstrap, validate up front;
+    # otherwise trust bootstrap to provide them.
+    if args.skip_bootstrap:
+        bootstrap_bins = ["git", "make", "wget", "tar",
+                          "python3", "pip3"]
+        for b in bootstrap_bins:
             pf.require_binary(b)
+        if args.nvme:
+            for b in ("parted", "mkfs.ext4", "mount"):
+                pf.require_binary(b)
 
     pf.require_writable(script_dir)
 
