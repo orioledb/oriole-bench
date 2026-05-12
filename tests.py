@@ -54,10 +54,11 @@ oriole_repo = "https://github.com/orioledb/orioledb"
 postgres_oriole_repo = "https://github.com/orioledb/postgres"
 postgres_master_repo = "https://github.com/postgres/postgres.git"
 
-go_tpc_repo = "https://github.com/pingcap/go-tpc.git"
-go_tpc_version = "v1.0.10"
-go_tpc_commit = "01c06538227a49fa8f0953cfdf3146a95b4a34a3"
-go_tpc_date = "2024-10-29 03:01:30"
+go_tpc_repo = "https://github.com/akorotkov/go-tpc.git"
+go_tpc_ref = "master"
+go_tpc_version_string = "master"
+go_tpc_commit = "89aa038"
+go_tpc_date = "2026-05-12"
 
 hammerdb_version = "4.12"
 hammerdb_binary_url = (
@@ -114,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override shared_buffers / orioledb.main_buffers value.",
     )
     p.add_argument(
+        "--undo-buffers", default="1GB",
+        help="orioledb.undo_buffers value (orioledb engine only).",
+    )
+    p.add_argument(
         "--results-dir", type=Path, default=default_results_dir,
         help="Where result files are written.",
     )
@@ -161,6 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument("--extended-logging", action="store_true",
                     help="Collect per-second psutil + pg_stat_activity samples "
                          "to a JSONL file (applied to all test types).")
+    tp.add_argument("--tpcc-stored-procs", action="store_true",
+                    help="TPC-C (go-tpc): dispatch transactions as PL/pgSQL "
+                         "stored procedures (postgres driver only).")
 
     ib = p.add_argument_group("ibench")
     ib.add_argument("--ibench-scale-mul", type=common.positive_int,
@@ -463,13 +471,14 @@ def build_go_tpc(*, force: bool) -> None:
         else:
             run(["git", "fetch", "--all", "--tags", "--prune"], cwd=go_tpc_dir)
 
-        # Lock to the version we advertise via ldflags so the source matches
-        # the build info.
-        run(["git", "checkout", go_tpc_version], cwd=go_tpc_dir)
+        # Lock to the branch/tag we want to advertise via ldflags so the
+        # source matches the build info.
+        run(["git", "checkout", go_tpc_ref], cwd=go_tpc_dir)
+        run(["git", "pull", "--ff-only"], cwd=go_tpc_dir, allow_fail=True)
 
         go_arch = detect_go_arch()
         ldflags = (
-            f'-X "main.version={go_tpc_version}" '
+            f'-X "main.version={go_tpc_version_string}" '
             f'-X "main.commit={go_tpc_commit}" '
             f'-X "main.date={go_tpc_date}"'
         )
@@ -477,6 +486,9 @@ def build_go_tpc(*, force: bool) -> None:
             "CGO_ENABLED": "0",
             "GOARCH": go_arch,
             "GO111MODULE": "on",
+            # The fork imports encoding/json/v2 from Go 1.25, which needs the
+            # jsonv2 experiment toggled on at compile time.
+            "GOEXPERIMENT": "jsonv2",
             # Use the public Go module proxy and skip checksum DB to avoid
             # network/policy surprises on CI machines.
             "GOPROXY": "https://proxy.golang.org,direct",
@@ -553,6 +565,8 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
     ]
     if args.memory_buffers is not None:
         cli += ["--memory-buffers", args.memory_buffers]
+    if args.undo_buffers is not None:
+        cli += ["--undo-buffers", args.undo_buffers]
     if args.fast_run:
         cli.append("--fast-run")
     if args.reuse_data:
@@ -576,6 +590,8 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
             cli += ["--warehouses", *(str(w) for w in args.warehouses)]
         if args.tpcc_conns:
             cli += ["--conns", *(str(c) for c in args.tpcc_conns)]
+        if args.tpcc_stored_procs:
+            cli.append("--stored-procs")
     elif test_name == "tpcc_hdb":
         if args.warehouses:
             cli += ["--warehouses", *(str(w) for w in args.warehouses)]

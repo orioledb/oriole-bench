@@ -531,6 +531,10 @@ def add_common_test_args(parser: argparse.ArgumentParser) -> None:
         help="Override shared_buffers / orioledb.main_buffers value.",
     )
     parser.add_argument(
+        "--undo-buffers", default="1GB",
+        help="orioledb.undo_buffers value (orioledb engine only).",
+    )
+    parser.add_argument(
         "--fast-run", action="store_true",
         help="Short benchmark runs (debug only).",
     )
@@ -810,6 +814,7 @@ def write_engine_config(
     engine: str,
     test: str,
     memory_buffers: str,
+    undo_buffers: str = "1GB",
 ) -> None:
     """Write postgresql.auto.conf for the given engine + test."""
     auto_conf = pgdatadir / "postgresql.auto.conf"
@@ -824,6 +829,7 @@ def write_engine_config(
             raise BenchError(f"OrioleDB config not found: {engine_conf}")
         append_file_to(engine_conf, auto_conf)
         append_line(auto_conf, f"orioledb.main_buffers = {memory_buffers}")
+        append_line(auto_conf, f"orioledb.undo_buffers = {undo_buffers}")
     elif engine == "heap":
         engine_conf = script_dir / f"postgresql.auto.conf.heap.{test}"
         if not engine_conf.is_file():

@@ -107,7 +107,7 @@ def preflight(args: argparse.Namespace) -> None:
 
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
-                    reuse_data: bool) -> bool:
+                    undo_buffers: str, reuse_data: bool) -> bool:
     """
     Initialize (or reuse) and start the PG cluster. Returns True if data needs
     to be (re)loaded with `pgbench -i`.
@@ -116,7 +116,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
             ensure_dir(pgdatadir)
-            write_engine_config(pgdatadir, engine, "pgbench", memory_buffers)
+            write_engine_config(pgdatadir, engine, "pgbench", memory_buffers, undo_buffers)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
         return False
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                              patch_id=args.patch_id,
                              test="pgbench", scale=f"s{pgbench_scale}")
     needs_load = prepare_cluster(pgdatadir, args.engine, memory_buffers,
-                                 args.reuse_data)
+                                 args.undo_buffers, args.reuse_data)
     if needs_load:
         with stage(f"load pgbench s={pgbench_scale}"):
             run(["pgbench", "postgres", "-i", f"-s{pgbench_scale}"])

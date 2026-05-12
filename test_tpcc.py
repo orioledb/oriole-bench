@@ -67,6 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Connection counts (overrides --linear-scale).")
     p.add_argument("--go-tpc", type=Path, default=go_tpc_binary,
                    help="Path to go-tpc binary.")
+    p.add_argument("--stored-procs", action="store_true",
+                   help="Use go-tpc's PL/pgSQL stored-procedure mode "
+                        "(postgres driver only).")
     return p
 
 
@@ -86,12 +89,13 @@ def preflight(args: argparse.Namespace) -> None:
 
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
-                    warehouses: int, go_tpc: Path, reuse_data: bool) -> bool:
+                    undo_buffers: str, warehouses: int, go_tpc: Path,
+                    reuse_data: bool) -> bool:
     """Init/reuse PGDATA and run go-tpc prepare. Returns True if data was loaded."""
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
             stop_pg_silent(pgdatadir)
-            write_engine_config(pgdatadir, engine, "tpcc", memory_buffers)
+            write_engine_config(pgdatadir, engine, "tpcc", memory_buffers, undo_buffers)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
         return False
@@ -105,7 +109,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
         pg_initdb(pgdatadir)
         pg_start(pgdatadir)
 
-        write_engine_config(pgdatadir, engine, "tpcc", memory_buffers)
+        write_engine_config(pgdatadir, engine, "tpcc", memory_buffers, undo_buffers)
         if engine == "orioledb":
             pg_psql("create extension orioledb;")
         pg_restart(pgdatadir)
@@ -130,7 +134,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
 
 def run_tpcc_measure(
     *, go_tpc: Path, warehouses: int, conns: int, measure_time: str,
-    monitor_path: Path | None, pgdatadir: Path,
+    monitor_path: Path | None, pgdatadir: Path, stored_procs: bool = False,
 ) -> int | None:
     cmd = [
         str(go_tpc), "tpcc",
@@ -141,6 +145,8 @@ def run_tpcc_measure(
         "-T", str(conns),
         "--time", measure_time,
     ]
+    if stored_procs:
+        cmd.append("--stored-procs")
     cm = (
         ResourceMonitor(monitor_path, mount_point=pgdatadir,
                         pgdatadir=pgdatadir)
@@ -187,13 +193,15 @@ def main(argv: list[str] | None = None) -> int:
 
         with stage(f"warehouses {w}"):
             if not args.init_point:
-                prepare_cluster(pgdatadir, args.engine, memory_buffers, w,
-                                args.go_tpc, args.reuse_data)
+                prepare_cluster(pgdatadir, args.engine, memory_buffers,
+                                args.undo_buffers, w, args.go_tpc,
+                                args.reuse_data)
 
             for a in conns_list:
                 if args.init_point:
-                    prepare_cluster(pgdatadir, args.engine, memory_buffers, w,
-                                    args.go_tpc, reuse_data=False)
+                    prepare_cluster(pgdatadir, args.engine, memory_buffers,
+                                    args.undo_buffers, w, args.go_tpc,
+                                    reuse_data=False)
 
                 append_text(result_file, f"{w},{a},")
                 pg_psql("checkpoint;")
@@ -206,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
                     go_tpc=args.go_tpc, warehouses=w, conns=a,
                     measure_time=measure_time,
                     monitor_path=monitor_path, pgdatadir=pgdatadir,
+                    stored_procs=args.stored_procs,
                 )
                 if tpm is None:
                     log.warning("    w=%d conns=%d: no tpmTotal in output", w, a)

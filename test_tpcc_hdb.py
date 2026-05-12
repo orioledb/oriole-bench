@@ -132,7 +132,7 @@ def preflight(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
-                    reuse_data: bool) -> bool:
+                    undo_buffers: str, reuse_data: bool) -> bool:
     """
     Init/reuse PGDATA. Returns True if HammerDB BUILD still needs to run.
 
@@ -143,7 +143,7 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
             stop_pg_silent(pgdatadir)
-            write_engine_config(pgdatadir, engine, "tpcc_hdb", memory_buffers)
+            write_engine_config(pgdatadir, engine, "tpcc_hdb", memory_buffers, undo_buffers)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
         return False
@@ -345,7 +345,8 @@ def main(argv: list[str] | None = None) -> int:
 
         with stage(f"warehouses {w}"):
             needs_build = prepare_cluster(pgdatadir, args.engine,
-                                          memory_buffers, args.reuse_data)
+                                          memory_buffers, args.undo_buffers,
+                                          args.reuse_data)
             if needs_build:
                 hdb_build(hammerdb=args.hammerdb, warehouses=w,
                           build_vu=args.build_vu, superuser=superuser)
