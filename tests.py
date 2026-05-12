@@ -342,6 +342,13 @@ def build_orioledb(ref: str, compiler: str, bid: str, *, force: bool) -> None:
         run(["git", "checkout", ref], cwd=orioledb_dir)
         patchset = read_pg_patchset_for_oriole(orioledb_dir)
         run(["git", "checkout", *patchset.split()], cwd=pg_oriole_dir)
+        # Wipe build artifacts left by previous configurations — pg_config.h
+        # changes from a fresh ./configure don't always propagate through
+        # make's incremental rebuild, leading to .o files compiled against
+        # the old config (notably pg_crc32c.o missing the runtime-check
+        # function pointer). Cheaper than chasing partial-rebuild bugs.
+        run(["git", "clean", "-fdx"], cwd=pg_oriole_dir)
+        run(["git", "clean", "-fdx"], cwd=orioledb_dir)
 
         overlay_env = {
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
@@ -387,6 +394,10 @@ def build_pg_master(ref: str, compiler: str, bid: str, *, force: bool) -> None:
         }
 
         run(["git", "checkout", ref], cwd=pg_dir)
+        # See build_orioledb() for the reasoning behind the unconditional
+        # tree wipe — stale .o files from a previous configure can survive
+        # incremental rebuilds and break extension dlopen.
+        run(["git", "clean", "-fdx"], cwd=pg_dir)
         nproc = str(cpu_count())
         run(["./configure", "--enable-debug", "--disable-cassert",
              "--enable-tap-tests", "--with-icu",
