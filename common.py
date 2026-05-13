@@ -921,6 +921,13 @@ def write_engine_config(
     if libs:
         append_line(auto_conf, f"shared_preload_libraries = '{','.join(libs)}'")
 
+    if pg_stat_statements:
+        # track=all so statements inside PL/pgSQL bodies are recorded too —
+        # otherwise we just see the outer CALL and miss the actual SELECT/
+        # UPDATE/INSERT mix. Bump max to keep room for all the nested entries.
+        append_line(auto_conf, "pg_stat_statements.track = all")
+        append_line(auto_conf, "pg_stat_statements.max = 10000")
+
 
 # ---------------------------------------------------------------------------
 # pg_stat_statements helpers (optional, gated on --pg-stat-statements)
