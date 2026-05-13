@@ -368,12 +368,11 @@ def main(argv: list[str] | None = None) -> int:
                 hdb_build(hammerdb=args.hammerdb, warehouses=w,
                           build_vu=args.build_vu, superuser=superuser)
 
-            if args.pg_stat_statements:
-                pgss_reset(db=hdb_pg_dbase)
-
             for vu in vu_list:
                 append_text(result_file, f"{w},{vu},")
                 pg_psql("checkpoint;")
+                if args.pg_stat_statements:
+                    pgss_reset(db=hdb_pg_dbase)
 
                 monitor_path = (
                     monitor_dir / f"w{w}-vu{vu}.jsonl"
@@ -394,11 +393,12 @@ def main(argv: list[str] | None = None) -> int:
                     log.info("    w=%d vu=%d nopm=%d tpm=%d", w, vu, nopm, tpm)
                     append_line(result_file, f"{nopm},{tpm}")
 
-            if args.pg_stat_statements:
-                pgss_dump_report(
-                    args.results_dir / f"{args.patch_id}-tpcc_hdb-w{w}-pgss.txt",
-                    db=hdb_pg_dbase,
-                )
+                if args.pg_stat_statements:
+                    pgss_dump_report(
+                        args.results_dir /
+                        f"{args.patch_id}-tpcc_hdb-w{w}-vu{vu}-pgss.txt",
+                        db=hdb_pg_dbase,
+                    )
 
             stop_pg_silent(pgdatadir)
 

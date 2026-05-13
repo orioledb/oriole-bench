@@ -211,9 +211,6 @@ def main(argv: list[str] | None = None) -> int:
                                 args.pg_stat_statements,
                                 w, args.go_tpc, args.reuse_data)
 
-            if args.pg_stat_statements:
-                pgss_reset()
-
             for a in conns_list:
                 if args.init_point:
                     prepare_cluster(pgdatadir, args.engine, memory_buffers,
@@ -221,11 +218,11 @@ def main(argv: list[str] | None = None) -> int:
                                     args.synchronous_commit,
                                     args.pg_stat_statements,
                                     w, args.go_tpc, reuse_data=False)
-                    if args.pg_stat_statements:
-                        pgss_reset()
 
                 append_text(result_file, f"{w},{a},")
                 pg_psql("checkpoint;")
+                if args.pg_stat_statements:
+                    pgss_reset()
 
                 monitor_path = (
                     monitor_dir / f"w{w}-c{a}.jsonl"
@@ -244,10 +241,11 @@ def main(argv: list[str] | None = None) -> int:
                     log.info("    w=%d conns=%d tpm=%d", w, a, tpm)
                     append_line(result_file, str(tpm))
 
-            if args.pg_stat_statements:
-                pgss_dump_report(
-                    args.results_dir / f"{args.patch_id}-tpcc-w{w}-pgss.txt"
-                )
+                if args.pg_stat_statements:
+                    pgss_dump_report(
+                        args.results_dir /
+                        f"{args.patch_id}-tpcc-w{w}-c{a}-pgss.txt"
+                    )
 
             stop_pg_silent(pgdatadir)
 

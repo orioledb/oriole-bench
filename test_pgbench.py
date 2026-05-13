@@ -202,9 +202,6 @@ def main(argv: list[str] | None = None) -> int:
     append_line(result_file, f"# {fast_msg} {now_str()}")
     append_line(result_file, "# conns, tps")
 
-    if args.pg_stat_statements:
-        pgss_reset()
-
     for t in args.subtests:
         with stage(f"subtest {t}"):
             append_line(result_file, subtest_headers[t])
@@ -219,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:
             for c in conns_list:
                 append_text(result_file, f"{c},")
                 pg_psql("checkpoint;")
+                if args.pg_stat_statements:
+                    pgss_reset()
+
                 monitor_path = (
                     monitor_dir / f"{t}-c{c}.jsonl"
                     if args.extended_logging else None
@@ -234,8 +234,11 @@ def main(argv: list[str] | None = None) -> int:
                     log.info("    conns=%d tps=%d", c, tps)
                     append_line(result_file, str(tps))
 
-    if args.pg_stat_statements:
-        pgss_dump_report(args.results_dir / f"{args.patch_id}-pgbench-pgss.txt")
+                if args.pg_stat_statements:
+                    pgss_dump_report(
+                        args.results_dir /
+                        f"{args.patch_id}-pgbench-{t}-c{c}-pgss.txt"
+                    )
 
     stop_pg_silent(pgdatadir)
     return 0
