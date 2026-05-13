@@ -194,6 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
                                       "(overrides --precise-pgbench).")
     pg.add_argument("--pgbench-tests", nargs="+", metavar="TEST",
                     help="Pgbench subtests to run (default: all).")
+    pg.add_argument("--pgbench-scale", type=common.positive_int, default=1000,
+                    help="Pgbench scale factor (-s) for init and run.")
 
     tp = p.add_argument_group("tpcc")
     tp.add_argument("--linear-scale", action="store_true",
@@ -668,6 +670,7 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
             cli += ["--conns", *(str(c) for c in args.pgbench_conns)]
         if args.pgbench_tests:
             cli += ["--subtests", *args.pgbench_tests]
+        cli += ["--scale", str(args.pgbench_scale)]
     elif test_name == "tpcc":
         if args.linear_scale:
             cli.append("--linear-scale")

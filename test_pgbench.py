@@ -46,8 +46,7 @@ from common import (
 )
 
 
-# Pgbench scale is fixed to 1000 (matches the original bash).
-pgbench_scale = 1000
+default_scale = 1000
 
 precise_conns = [
     5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 18, 20, 22, 24, 27, 30, 33, 36, 39,
@@ -84,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     add_common_test_args(p)
+    p.add_argument("--scale", type=positive_int, default=default_scale,
+                   help="pgbench scale factor (-s) for init and run.")
     p.add_argument("--precise", action="store_true",
                    help="Use the dense connection list (overridden by --conns).")
     p.add_argument("--conns", nargs="+", type=positive_int, metavar="N",
@@ -146,12 +147,13 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
 
 
 def run_pgbench_session(*, extra_args: list[str], conns: int, run_time: int,
+                        scale: int,
                         monitor_path: Path | None,
                         pgdatadir: Path) -> int | None:
     cmd = [
         "pgbench", "postgres",
         *extra_args,
-        f"-s{pgbench_scale}", "-M", "prepared",
+        f"-s{scale}", "-M", "prepared",
         "-T", str(run_time),
         "-j", str(conns),
         "-c", str(conns),
@@ -183,14 +185,14 @@ def main(argv: list[str] | None = None) -> int:
 
     pgdatadir = data_dir_for(args.pgdata_base, engine=args.engine,
                              data_id=args.data_id or args.patch_id,
-                             test="pgbench", scale=f"s{pgbench_scale}")
+                             test="pgbench", scale=f"s{args.scale}")
     needs_load = prepare_cluster(pgdatadir, args.engine, memory_buffers,
                                  args.undo_buffers, args.fsync,
                                  args.synchronous_commit,
                                  args.pg_stat_statements, args.reuse_data)
     if needs_load:
-        with stage(f"load pgbench s={pgbench_scale}"):
-            run(["pgbench", "postgres", "-i", f"-s{pgbench_scale}"])
+        with stage(f"load pgbench s={args.scale}"):
+            run(["pgbench", "postgres", "-i", f"-s{args.scale}"])
             pg_psql_file(script_dir / "orioledb-prepare-function.sql")
 
     ensure_dir(args.results_dir)
@@ -225,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 tps = run_pgbench_session(
                     extra_args=extra, conns=c, run_time=run_time,
+                    scale=args.scale,
                     monitor_path=monitor_path, pgdatadir=pgdatadir,
                 )
                 if tps is None:
