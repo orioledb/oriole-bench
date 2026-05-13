@@ -363,6 +363,14 @@ def build_orioledb(ref: str, compiler: str, bid: str, *, force: bool) -> None:
         run(["make", "-C", "src/bin/pgbench", "-j", nproc, "-s", "install"],
             cwd=pg_oriole_dir, env=overlay_env)
 
+        # contrib provides pg_stat_statements (and friends). Built the same
+        # way as in build_pg_master so the same extensions are available
+        # regardless of which engine we test against.
+        run(["make", "-C", "contrib", "-j", nproc, "-s"],
+            cwd=pg_oriole_dir, env=overlay_env)
+        run(["make", "-C", "contrib", "-j", nproc, "-s", "install"],
+            cwd=pg_oriole_dir, env=overlay_env)
+
         run(["make", "-j", nproc, "USE_PGXS=1", "IS_DEV=1"],
             cwd=orioledb_dir, env=overlay_env)
         run(["make", "-j", nproc, "USE_PGXS=1", "IS_DEV=1", "install"],
