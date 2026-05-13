@@ -921,12 +921,11 @@ def write_engine_config(
     if libs:
         append_line(auto_conf, f"shared_preload_libraries = '{','.join(libs)}'")
 
-    if pg_stat_statements:
-        # track=all so statements inside PL/pgSQL bodies are recorded too —
-        # otherwise we just see the outer CALL and miss the actual SELECT/
-        # UPDATE/INSERT mix. Bump max to keep room for all the nested entries.
-        append_line(auto_conf, "pg_stat_statements.track = all")
-        append_line(auto_conf, "pg_stat_statements.max = 10000")
+    # Note: pg_stat_statements GUCs (track, max, ...) intentionally live
+    # somewhere else — see enable_pg_stat_statements(). PG18+ rejects them
+    # in postgresql.auto.conf as "reserved prefix" because the extension
+    # registers them too late in startup, so we set them via ALTER SYSTEM
+    # after CREATE EXTENSION.
 
 
 # ---------------------------------------------------------------------------
@@ -935,6 +934,12 @@ def write_engine_config(
 
 def enable_pg_stat_statements(*, db: str = "postgres") -> None:
     pg_psql("CREATE EXTENSION IF NOT EXISTS pg_stat_statements;", db=db)
+    # track=all so statements *inside* PL/pgSQL bodies are recorded too — by
+    # default we'd only see the outer CALL tpcc_*(...) and miss the actual
+    # SELECT/UPDATE/INSERT mix. The setting is cluster-wide (PGC_SUSET); a
+    # reload makes it stick.
+    pg_psql("ALTER SYSTEM SET pg_stat_statements.track = 'all';", db=db)
+    pg_psql("SELECT pg_reload_conf();", db=db)
 
 
 def pgss_reset(*, db: str = "postgres") -> None:
