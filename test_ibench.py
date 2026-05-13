@@ -24,6 +24,7 @@ from common import (
     append_line,
     assert_pg_build_in_path,
     data_dir_for,
+    enable_pg_stat_statements,
     ensure_dir,
     is_pgdata_initialized,
     log,
@@ -32,6 +33,8 @@ from common import (
     pg_psql,
     pg_restart,
     pg_start,
+    pgss_dump_report,
+    pgss_reset,
     positive_int,
     remove_dir,
     script_dir,
@@ -77,15 +80,19 @@ def preflight(args: argparse.Namespace) -> None:
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
                     undo_buffers: str, fsync: str, synchronous_commit: str,
+                    pg_stat_statements: bool,
                     reuse_data: bool) -> None:
     stop_pg_silent(pgdatadir)
     cfg_args = dict(memory_buffers=memory_buffers, undo_buffers=undo_buffers,
-                    fsync=fsync, synchronous_commit=synchronous_commit)
+                    fsync=fsync, synchronous_commit=synchronous_commit,
+                    pg_stat_statements=pg_stat_statements)
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
             write_engine_config(pgdatadir, engine, "ibench", **cfg_args)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
+            if pg_stat_statements:
+                enable_pg_stat_statements()
         return
 
     with stage(f"init pgdata {pgdatadir.name}"):
@@ -97,6 +104,8 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
         if engine == "orioledb":
             pg_psql("create extension orioledb;")
         pg_restart(pgdatadir)
+        if pg_stat_statements:
+            enable_pg_stat_statements()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                              test="ibench", scale=f"scale{scale_mul}")
     prepare_cluster(pgdatadir, args.engine, memory_buffers,
                     args.undo_buffers, args.fsync, args.synchronous_commit,
-                    args.reuse_data)
+                    args.pg_stat_statements, args.reuse_data)
 
     ensure_dir(args.results_dir)
     result_file = args.results_dir / f"{args.patch_id}-ibench-scale{scale_mul}"
@@ -134,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         "orioledb_undo, time, checkpoint time",
     )
 
+    if args.pg_stat_statements:
+        pgss_reset()
+
     run_ibench.run(
         engine=args.engine,
         patch_id=args.patch_id,
@@ -144,6 +156,11 @@ def main(argv: list[str] | None = None) -> int:
         result_file=result_file,
         monitor_dir=monitor_dir,
     )
+
+    if args.pg_stat_statements:
+        pgss_dump_report(
+            args.results_dir / f"{args.patch_id}-ibench-scale{scale_mul}-pgss.txt"
+        )
 
     stop_pg_silent(pgdatadir)
     return 0

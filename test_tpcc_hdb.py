@@ -32,6 +32,7 @@ from common import (
     append_text,
     assert_pg_build_in_path,
     data_dir_for,
+    enable_pg_stat_statements,
     ensure_dir,
     is_pgdata_initialized,
     log,
@@ -41,6 +42,8 @@ from common import (
     pg_psql,
     pg_restart,
     pg_start,
+    pgss_dump_report,
+    pgss_reset,
     positive_int,
     remove_dir,
     run,
@@ -133,22 +136,27 @@ def preflight(args: argparse.Namespace) -> None:
 
 def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
                     undo_buffers: str, fsync: str, synchronous_commit: str,
+                    pg_stat_statements: bool,
                     reuse_data: bool) -> bool:
     """
     Init/reuse PGDATA. Returns True if HammerDB BUILD still needs to run.
 
-    For engine=orioledb we install the extension into template1 so the tpcc
-    database that HammerDB CREATE-DATABASE's later automatically inherits it
-    (HammerDB itself doesn't know about orioledb).
+    For engine=orioledb (and for pg_stat_statements) we install the extension
+    into template1 so the tpcc database HammerDB CREATE-DATABASE's later
+    automatically inherits it (HammerDB itself doesn't know about either).
     """
     cfg_args = dict(memory_buffers=memory_buffers, undo_buffers=undo_buffers,
-                    fsync=fsync, synchronous_commit=synchronous_commit)
+                    fsync=fsync, synchronous_commit=synchronous_commit,
+                    pg_stat_statements=pg_stat_statements)
     if reuse_data and is_pgdata_initialized(pgdatadir):
         with stage(f"reuse pgdata {pgdatadir.name}"):
             stop_pg_silent(pgdatadir)
             write_engine_config(pgdatadir, engine, "tpcc_hdb", **cfg_args)
             pg_start(pgdatadir)
             pg_restart(pgdatadir)
+            if pg_stat_statements:
+                # tpcc DB already exists; install directly there.
+                enable_pg_stat_statements(db=hdb_pg_dbase)
         return False
 
     with stage(f"init pgdata {pgdatadir.name}"):
@@ -160,12 +168,16 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
         pg_initdb(pgdatadir)
         pg_start(pgdatadir)
         write_engine_config(pgdatadir, engine, "tpcc_hdb", **cfg_args)
-        if engine == "orioledb":
-            # Install the extension into template1 so the database HammerDB
-            # creates inherits it. We restart afterwards to pick up
-            # shared_preload_libraries=orioledb from the auto.conf.
+        if engine == "orioledb" or pg_stat_statements:
+            # Install extensions into template1 so the database HammerDB
+            # creates inherits them. Restart first to pick up
+            # shared_preload_libraries from the auto.conf.
             pg_restart(pgdatadir)
-            run(["psql", "-dtemplate1", "-c", "create extension orioledb;"])
+            if engine == "orioledb":
+                run(["psql", "-dtemplate1", "-c", "create extension orioledb;"])
+            if pg_stat_statements:
+                run(["psql", "-dtemplate1", "-c",
+                     "create extension pg_stat_statements;"])
         pg_restart(pgdatadir)
         if engine == "orioledb":
             pg_psql("show shared_buffers; show orioledb.main_buffers; "
@@ -350,10 +362,14 @@ def main(argv: list[str] | None = None) -> int:
             needs_build = prepare_cluster(pgdatadir, args.engine,
                                           memory_buffers, args.undo_buffers,
                                           args.fsync, args.synchronous_commit,
+                                          args.pg_stat_statements,
                                           args.reuse_data)
             if needs_build:
                 hdb_build(hammerdb=args.hammerdb, warehouses=w,
                           build_vu=args.build_vu, superuser=superuser)
+
+            if args.pg_stat_statements:
+                pgss_reset(db=hdb_pg_dbase)
 
             for vu in vu_list:
                 append_text(result_file, f"{w},{vu},")
@@ -377,6 +393,12 @@ def main(argv: list[str] | None = None) -> int:
                     nopm, tpm = result
                     log.info("    w=%d vu=%d nopm=%d tpm=%d", w, vu, nopm, tpm)
                     append_line(result_file, f"{nopm},{tpm}")
+
+            if args.pg_stat_statements:
+                pgss_dump_report(
+                    args.results_dir / f"{args.patch_id}-tpcc_hdb-w{w}-pgss.txt",
+                    db=hdb_pg_dbase,
+                )
 
             stop_pg_silent(pgdatadir)
 

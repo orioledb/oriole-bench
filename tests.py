@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="postgresql.conf 'synchronous_commit' value.",
     )
     p.add_argument(
+        "--pg-stat-statements", action="store_true",
+        help="Enable pg_stat_statements during the run and dump a "
+             "top-50 report alongside each test's result file.",
+    )
+    p.add_argument(
         "--results-dir", type=Path, default=default_results_dir,
         help="Where result files are written.",
     )
@@ -639,6 +644,8 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
         cli += ["--undo-buffers", args.undo_buffers]
     cli += ["--fsync", args.fsync,
             "--synchronous-commit", args.synchronous_commit]
+    if args.pg_stat_statements:
+        cli.append("--pg-stat-statements")
     if args.fast_run:
         cli.append("--fast-run")
     if args.reuse_data:

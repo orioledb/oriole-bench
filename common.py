@@ -554,6 +554,11 @@ def add_common_test_args(parser: argparse.ArgumentParser) -> None:
         help="postgresql.conf 'synchronous_commit' value.",
     )
     parser.add_argument(
+        "--pg-stat-statements", action="store_true",
+        help="Enable pg_stat_statements during the run and dump a top-50 "
+             "report to results/<patch>-<test>-pgss.txt afterwards.",
+    )
+    parser.add_argument(
         "--fast-run", action="store_true",
         help="Short benchmark runs (debug only).",
     )
@@ -874,6 +879,7 @@ def write_engine_config(
     undo_buffers: str = "1GB",
     fsync: str = "off",
     synchronous_commit: str = "off",
+    pg_stat_statements: bool = False,
 ) -> None:
     """Write postgresql.auto.conf for the given engine + test."""
     auto_conf = pgdatadir / "postgresql.auto.conf"
@@ -902,6 +908,59 @@ def write_engine_config(
         append_line(auto_conf, f"shared_buffers = {memory_buffers}")
     else:
         raise BenchError(f"Unknown engine: {engine}")
+
+    # shared_preload_libraries override: combine the engine-required library
+    # (orioledb) with optional pg_stat_statements. PG honours the *last*
+    # shared_preload_libraries line, so this overrides whatever the engine
+    # config wrote earlier.
+    libs = []
+    if engine == "orioledb":
+        libs.append("orioledb")
+    if pg_stat_statements:
+        libs.append("pg_stat_statements")
+    if libs:
+        append_line(auto_conf, f"shared_preload_libraries = '{','.join(libs)}'")
+
+
+# ---------------------------------------------------------------------------
+# pg_stat_statements helpers (optional, gated on --pg-stat-statements)
+# ---------------------------------------------------------------------------
+
+def enable_pg_stat_statements(*, db: str = "postgres") -> None:
+    pg_psql("CREATE EXTENSION IF NOT EXISTS pg_stat_statements;", db=db)
+
+
+def pgss_reset(*, db: str = "postgres") -> None:
+    pg_psql("SELECT pg_stat_statements_reset();", db=db)
+
+
+_pgss_report_sql = r"""
+SELECT
+    calls,
+    round(total_exec_time::numeric, 1) AS total_ms,
+    round(mean_exec_time::numeric, 3) AS mean_ms,
+    round((100.0 * total_exec_time
+           / NULLIF(SUM(total_exec_time) OVER (), 0))::numeric, 2) AS pct,
+    rows,
+    substr(regexp_replace(query, E'[\\n\\r\\s]+', ' ', 'g'), 1, 160) AS query
+FROM pg_stat_statements
+WHERE query NOT LIKE '%pg_stat_statements%'
+ORDER BY total_exec_time DESC NULLS LAST
+LIMIT 50;
+"""
+
+
+def pgss_dump_report(out_path: Path, *, db: str = "postgres") -> None:
+    """
+    Run a top-50-by-total-time SELECT against pg_stat_statements and write
+    psql's default aligned output to out_path. Header line on top records
+    the (now, db) for traceability.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    header = f"# pg_stat_statements report — {now_str()} — db={db}\n\n"
+    proc = run(["psql", f"-d{db}", "-P", "pager=off", "-X",
+                "-c", _pgss_report_sql], capture=True)
+    out_path.write_text(header + (proc.stdout or ""))
 
 
 # ---------------------------------------------------------------------------
