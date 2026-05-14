@@ -437,10 +437,18 @@ def wait_all(procs: Iterable[subprocess.Popen], *, label: str = "background job"
         raise BenchError(f"One or more {label} processes failed: {details}")
 
 
+# pg_ctl's default per-action wait is 60s, which is too short for startup
+# / shutdown on hot OrioleDB clusters with large buffer pools and pending
+# undo log to apply. 300s is enough to cover the slowest start/stop we've
+# observed at orioledb.main_buffers >= 32GB.
+pg_ctl_timeout = "300"
+
+
 def stop_pg_silent(pgdatadir: str | os.PathLike[str]) -> None:
     logfile = str(_pg_logfile_for(pgdatadir))
     try:
-        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "stop"], allow_fail=True)
+        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile,
+             "-t", pg_ctl_timeout, "stop"], allow_fail=True)
     except BenchError:
         pass
 
@@ -856,7 +864,8 @@ def _dump_pg_log_tail(logfile: Path | str, *, lines: int = 60) -> None:
 def pg_start(pgdatadir: Path | str, logfile: str | Path | None = None) -> None:
     logfile = str(logfile) if logfile is not None else str(_pg_logfile_for(pgdatadir))
     try:
-        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "start"])
+        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile,
+             "-t", pg_ctl_timeout, "start"])
     except BenchError:
         _dump_pg_log_tail(logfile)
         raise
@@ -865,7 +874,8 @@ def pg_start(pgdatadir: Path | str, logfile: str | Path | None = None) -> None:
 def pg_restart(pgdatadir: Path | str, logfile: str | Path | None = None) -> None:
     logfile = str(logfile) if logfile is not None else str(_pg_logfile_for(pgdatadir))
     try:
-        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "restart"])
+        run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile,
+             "-t", pg_ctl_timeout, "restart"])
     except BenchError:
         _dump_pg_log_tail(logfile)
         raise
@@ -874,7 +884,8 @@ def pg_restart(pgdatadir: Path | str, logfile: str | Path | None = None) -> None
 def pg_stop(pgdatadir: Path | str, logfile: str | Path | None = None,
             *, allow_fail: bool = False) -> None:
     logfile = str(logfile) if logfile is not None else str(_pg_logfile_for(pgdatadir))
-    run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile, "stop"], allow_fail=allow_fail)
+    run(["pg_ctl", "-D", str(pgdatadir), "-l", logfile,
+         "-t", pg_ctl_timeout, "stop"], allow_fail=allow_fail)
 
 
 def is_pgdata_initialized(pgdatadir: Path) -> bool:
