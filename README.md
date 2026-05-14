@@ -3,9 +3,10 @@
 Drives end-to-end PG / OrioleDB benchmarks: bootstraps system + Python
 dependencies on a fresh Ubuntu VM, clones and builds the requested PG and
 OrioleDB refs, sets up the bench tools (`go-tpc`, optionally `HammerDB` and
-`mdcallag/iibench`), and runs `pgbench` / TPC-C (go-tpc) / TPC-C
-(HammerDB, stored-procedure mode) / `ibench`. Designed for large AWS
-instances (c7g/c7gd-class). Mainly for internal use — use at your own risk.
+`mdcallag/iibench`), and runs `pgbench` / TPC-C (go-tpc per-statement) /
+TPC-C (pgbench + PL/pgSQL procedures) / TPC-C (HammerDB stored-procedure
+mode) / `ibench`. Designed for large AWS instances (c7g/c7gd-class).
+Mainly for internal use — use at your own risk.
 
 ## What's where
 
@@ -13,13 +14,16 @@ instances (c7g/c7gd-class). Mainly for internal use — use at your own risk.
 |---|---|
 | `tests.py` | Top-level orchestrator: bootstrap → build → prepare env → run tests |
 | `test_pgbench.py` | Pgbench driver (select / select_any / tpc-b / tpc-b procedure) |
-| `test_tpcc.py` | TPC-C driver via `go-tpc` (per-statement mode) |
+| `test_tpcc.py` | TPC-C driver via `go-tpc` (per-statement mode; `--stored-procs` flag also available) |
+| `test_tpcc_pgb.py` | TPC-C driver via **pgbench + PL/pgSQL procedures** |
 | `test_tpcc_hdb.py` | TPC-C driver via HammerDB in **stored-procedure mode** |
 | `test_ibench.py`, `run_ibench.py`, `report_ibench.py` | mdcallag ibench multi-phase workflow |
 | `common.py` | Shared utilities: `run()` wrapper, stage / log routing, `ResourceMonitor`, preflight, bootstrap |
 | `aggregate_resources.py` | Summarises ResourceMonitor JSONL files (means, growth, wait events) |
 | `postgresql.auto.conf.*` | Per-test, per-engine PG configs that are concatenated into the live `postgresql.auto.conf` |
 | `orioledb-*.sql` | pgbench script files (`select_any9/30/50`, `tpc-b-procedure`, prepare function) |
+| `tpcc-procs.sql` | Stored procedures (`tpcc_new_order / payment / order_status / delivery / stock_level` + `tpcc_c_last` helper) installed by `tpcc_pgb` |
+| `tpcc-{neword,payment,order-status,delivery,stock-level}.sql` | pgbench scripts that `CALL` those procedures with the spec's 45/43/4/4/4 mix |
 
 ## Quick start
 
@@ -30,7 +34,7 @@ cd oriole-bench
 # Compare two postgres-master refs and one orioledb build, all suites,
 # using the local NVMe disk for pgdata:
 ./tests.py --oriole-id beta15 --pg-id REL_17_8 master \
-           --tests pgbench tpcc ibench \
+           --tests pgbench tpcc tpcc_pgb ibench \
            --nvme --extended-logging
 ```
 
@@ -53,12 +57,22 @@ failure, the BenchError message includes the path to the relevant log.
 ```
 --oriole-id REF [REF ...]   OrioleDB tags / commits / branches to compare
 --pg-id REF [REF ...]       Postgres tags / commits / branches to compare
---tests TEST [TEST ...]     pgbench | tpcc | tpcc_hdb | ibench (default: all four)
+--tests TEST [TEST ...]     pgbench | tpcc | tpcc_pgb | tpcc_hdb | ibench
+                            (default: all five)
+--compiler CC [CC ...]      C compiler(s) to build PG with: clang (clang-17) or
+                            gcc. Each (ref, compiler) pair is a separate build
+                            under pgbin/<kind>-<ref>-<compiler>.
 --fast-run                  Short benchmark runs (for debug, not real measurements)
 --nvme                      Format and mount the local NVMe device on /ssd
                             (compatible with c7gd layout; skipped automatically
                              if /ssd is already a mount point)
 --memory-buffers VAL        Override shared_buffers / orioledb.main_buffers
+--undo-buffers VAL          orioledb.undo_buffers (orioledb engine only, default 1GB)
+--fsync {on,off}            postgresql.conf 'fsync' (default off)
+--synchronous-commit {on,off}  postgresql.conf 'synchronous_commit' (default off)
+--pg-stat-statements        Enable pg_stat_statements with track=all and dump
+                            a top-50 report per measurement point
+                            (`results/<patch>-<test>-...-pgss.txt`)
 --results-dir PATH          Where result files are written (default ./results)
 --pgdata-base PATH          Parent dir for per-test PGDATA directories
                             (default /ssd; per-test dirs encode engine + patch_id
@@ -77,9 +91,12 @@ Behavior:
 
 Per-suite groups (see `./tests.py --help` for the full list):
 
-* **pgbench**: `--precise-pgbench`, `--pgbench-conns`, `--pgbench-tests`
+* **pgbench**: `--precise-pgbench`, `--pgbench-conns`, `--pgbench-tests`,
+  `--pgbench-scale` (default 1000)
 * **tpcc** (go-tpc): `--linear-scale`, `--init-point`, `--warehouses`,
-  `--tpcc-conns`
+  `--tpcc-conns`, `--tpcc-stored-procs` (dispatches via PL/pgSQL inside go-tpc)
+* **tpcc_pgb** (pgbench + procs): shares `--linear-scale`, `--init-point`,
+  `--warehouses`, `--tpcc-conns` with the go-tpc suite
 * **tpcc_hdb** (HammerDB): `--hdb-rampup-min`, `--hdb-duration-min`,
   `--hdb-build-vu`. Shares `--warehouses` and `--tpcc-conns` (= virtual
   users) with the go-tpc suite.
@@ -101,7 +118,28 @@ time: 30s. `--fast-run` cuts that to 5s.
 Statement-mode TPC-C. Sweep over `--warehouses × --tpcc-conns`. Per
 warehouses value, `go-tpc tpcc prepare` is run once, then go-tpc gets a
 fresh `run` for each connection count (or per-point if `--init-point`).
-Default measurement: 100s; `--fast-run`: 5s.
+Default measurement: 100s; `--fast-run`: 5s. `--tpcc-stored-procs`
+switches go-tpc to dispatch each transaction as a single `CALL` to the
+same five PL/pgSQL procedures used by `tpcc_pgb` (postgres driver only).
+
+### TPC-C via pgbench (tpcc_pgb)
+
+Same workload, different client driver: `go-tpc tpcc prepare` loads the
+schema and data, then `tpcc-procs.sql` installs the five stored
+procedures (`tpcc_new_order / payment / order_status / delivery /
+stock_level` + the `tpcc_c_last(n)` NURand helper), and pgbench runs the
+five `tpcc-*.sql` scripts with the 45/43/4/4/4 mix via `-f script@weight`.
+
+* Result rows write **tpmTotal** (`tps × 60` across all five transaction
+  types), matching the semantics of `test_tpcc.py`. tpmC (NEW_ORDER
+  only) is approximately `0.45 × tpm`.
+* Per-warehouses PGDATA: `pgdata-<engine>-<patch_id>-tpcc_pgb-w<W>`.
+* `-M prepared` is used and `--max-tries=100` is passed to pgbench so
+  the inevitable NEW_ORDER ↔ PAYMENT deadlocks retry instead of aborting
+  the client.
+* Useful as a third reference point against `tpcc` (go-tpc) and
+  `tpcc_hdb` (HammerDB) — same engine-side code path as
+  `tpcc --stored-procs`, but pgbench replaces Go runtime + lib/pq.
 
 ### TPC-C via HammerDB (stored-procedure mode)
 
@@ -193,6 +231,14 @@ subtests, 100GB buffers:
            --pgbench-conns 10 50 100
 ```
 
+Three TPC-C reference points (go-tpc per-statement, pgbench + procs,
+HammerDB stored-procs) side by side, with pg_stat_statements top-50s:
+```bash
+./tests.py --oriole-id main --tests tpcc tpcc_pgb tpcc_hdb \
+           --warehouses 100 --tpcc-conns 100 50 \
+           --pg-stat-statements --extended-logging
+```
+
 ## Resource monitoring
 
 `--extended-logging` enables per-second sampling via `psutil` and
@@ -222,8 +268,9 @@ Means for everything, last-value + average growth bytes/sec for
 
 | Suite | Default scale | Pgdata size |
 |---|---|---|
-| pgbench | s=1000 | ~16 GB |
+| pgbench | s=1000 (tunable via `--pgbench-scale`) | ~16 GB |
 | tpcc (go-tpc) | 470 / 220 / 100 / 47 / 22 / 10 / 5 warehouses, separate dir each | up to ~80 GB for the biggest |
+| tpcc_pgb (pgbench + procs) | same as tpcc | same as tpcc |
 | tpcc_hdb | similar | similar |
 | ibench | scale_mul = 100 | ~200 GB |
 
