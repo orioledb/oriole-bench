@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import shutil
 import sys
 from pathlib import Path
 
@@ -61,6 +62,10 @@ go_tpc_commit = "89aa038"
 go_tpc_date = "2026-05-12"
 
 hammerdb_version = "4.12"
+
+benchbase_repo = "https://github.com/cmu-db/benchbase.git"
+benchbase_ref = "main"
+benchbase_jdk_apt = "openjdk-21-jdk"
 
 # Map the user-facing --compiler choice to the CC value passed to configure.
 # clang-17 is what orioledb/ci/prerequisites.sh installs on Ubuntu.
@@ -231,6 +236,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "(ignored on --fast-run).")
     hdb.add_argument("--hdb-build-vu", type=common.positive_int, default=16,
                      help="HammerDB: virtual users used for schema BUILD.")
+
+    bb = p.add_argument_group("tpcc_bb (BenchBase TPC-C)")
+    bb.add_argument("--bb-rampup-min", type=common.positive_int, default=1,
+                    help="BenchBase: warmup time in minutes (ignored on "
+                         "--fast-run).")
+    bb.add_argument("--bb-duration-min", type=common.positive_int, default=3,
+                    help="BenchBase: measurement duration in minutes "
+                         "(ignored on --fast-run).")
 
     return p
 
@@ -589,6 +602,68 @@ def build_go_tpc(*, force: bool) -> None:
             raise BenchError(f"go-tpc binary not produced at {binary}")
 
 
+def install_jdk(*, needed: bool) -> None:
+    """Install OpenJDK 21 (BenchBase needs Java 21+). No-op if `java` is
+    already on PATH — we trust whatever the user has."""
+    if not needed:
+        return
+    if shutil.which("java") is not None:
+        log.info("Reusing existing Java toolchain (java in PATH).")
+        return
+    with stage(f"install {benchbase_jdk_apt}"):
+        common.apt_install([benchbase_jdk_apt])
+
+
+def build_benchbase(*, force: bool, needed: bool) -> None:
+    """
+    Clone + build BenchBase, extract benchbase-postgres.tgz to ./benchbase/.
+
+    The Maven build downloads ~hundreds of MB of plugins the first time, so
+    it's gated by `force` like every other tools build. Layout after this:
+        benchbase-src/   — git checkout, Maven build tree
+        benchbase/       — extracted distribution, contains benchbase.jar
+    """
+    if not needed:
+        return
+
+    src_dir = script_dir / "benchbase-src"
+    dist_dir = script_dir / "benchbase"
+    if (dist_dir / "benchbase.jar").is_file() and not force:
+        log.info("Reusing existing BenchBase at %s", dist_dir)
+        return
+
+    with stage("build benchbase"):
+        if force or not (src_dir / ".git").exists():
+            remove_dir(src_dir)
+            run(["git", "clone", benchbase_repo, str(src_dir)],
+                cwd=script_dir)
+        else:
+            run(["git", "fetch", "--all", "--tags", "--prune"], cwd=src_dir)
+        run(["git", "checkout", benchbase_ref], cwd=src_dir)
+        run(["git", "pull", "--ff-only"], cwd=src_dir, allow_fail=True)
+
+        # mvnw is a Maven wrapper bundled in the repo; uses ./mvnw via bash
+        # so we don't have to chmod +x it (the file may be 644 on a fresh
+        # checkout, and chmod would show up as a dirty working tree).
+        run(["bash", "./mvnw", "-P", "postgres", "clean", "package",
+             "-DskipTests"], cwd=src_dir)
+
+        tgz = src_dir / "target" / "benchbase-postgres.tgz"
+        if not tgz.is_file():
+            raise BenchError(
+                f"BenchBase build finished but {tgz} was not produced — "
+                f"check the Maven log."
+            )
+        remove_dir(dist_dir)
+        ensure_dir(dist_dir)
+        run(["tar", "-xzf", str(tgz), "--strip-components=1",
+             "-C", str(dist_dir)])
+        if not (dist_dir / "benchbase.jar").is_file():
+            raise BenchError(
+                f"After extraction, benchbase.jar not found in {dist_dir}"
+            )
+
+
 def mount_nvme() -> None:
     if os.path.ismount("/ssd"):
         log.info("Reusing existing /ssd mount (skipping NVMe format).")
@@ -623,10 +698,13 @@ def setup_test_environment(args: argparse.Namespace) -> None:
         # (`go-tpc tpcc prepare`); pgbench drives the actual measurement.
         need_go_tpc = "tpcc" in args.tests or "tpcc_pgb" in args.tests
         need_hammerdb = "tpcc_hdb" in args.tests
+        need_benchbase = "tpcc_bb" in args.tests
         if need_go_tpc:
             install_go(force=args.reinitialize)
             build_go_tpc(force=args.reinitialize)
         install_hammerdb(force=args.reinitialize, needed=need_hammerdb)
+        install_jdk(needed=need_benchbase)
+        build_benchbase(force=args.reinitialize, needed=need_benchbase)
 
         run(["sudo", "mkdir", "-p", str(args.pgdata_base)])
         if args.nvme:
@@ -703,6 +781,16 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
             "--rampup-min", str(args.hdb_rampup_min),
             "--duration-min", str(args.hdb_duration_min),
             "--build-vu", str(args.hdb_build_vu),
+        ]
+    elif test_name == "tpcc_bb":
+        if args.warehouses:
+            cli += ["--warehouses", *(str(w) for w in args.warehouses)]
+        if args.tpcc_conns:
+            cli += ["--terminals", *(str(c) for c in args.tpcc_conns)]
+        cli += [
+            "--benchbase", str(script_dir / "benchbase"),
+            "--rampup-min", str(args.bb_rampup_min),
+            "--duration-min", str(args.bb_duration_min),
         ]
     elif test_name == "ibench":
         if args.ibench_scale_mul is not None:
