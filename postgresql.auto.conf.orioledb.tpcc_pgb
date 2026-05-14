@@ -1,0 +1,5 @@
+shared_preload_libraries = 'orioledb'
+default_table_access_method = orioledb
+#orioledb.default_compress = 5
+#orioledb.default_primary_compress = 5
+#orioledb.default_toast_compress = 5

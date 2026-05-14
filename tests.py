@@ -619,7 +619,9 @@ def mount_nvme() -> None:
 
 def setup_test_environment(args: argparse.Namespace) -> None:
     with stage("prepare environment"):
-        need_go_tpc = "tpcc" in args.tests
+        # tpcc_pgb also uses go-tpc, but only for the data-load step
+        # (`go-tpc tpcc prepare`); pgbench drives the actual measurement.
+        need_go_tpc = "tpcc" in args.tests or "tpcc_pgb" in args.tests
         need_hammerdb = "tpcc_hdb" in args.tests
         if need_go_tpc:
             install_go(force=args.reinitialize)
@@ -682,6 +684,15 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
             cli += ["--conns", *(str(c) for c in args.tpcc_conns)]
         if args.tpcc_stored_procs:
             cli.append("--stored-procs")
+    elif test_name == "tpcc_pgb":
+        if args.linear_scale:
+            cli.append("--linear-scale")
+        if args.init_point:
+            cli.append("--init-point")
+        if args.warehouses:
+            cli += ["--warehouses", *(str(w) for w in args.warehouses)]
+        if args.tpcc_conns:
+            cli += ["--conns", *(str(c) for c in args.tpcc_conns)]
     elif test_name == "tpcc_hdb":
         if args.warehouses:
             cli += ["--warehouses", *(str(w) for w in args.warehouses)]
