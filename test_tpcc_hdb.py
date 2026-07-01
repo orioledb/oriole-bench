@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import getpass
+import math
 import os
 import re
 import sys
@@ -24,6 +25,7 @@ from pathlib import Path
 
 import common
 from common import (
+    BackendSampler,
     BenchError,
     Preflight,
     ResourceMonitor,
@@ -103,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Rampup time in minutes (ignored on --fast-run).")
     p.add_argument("--duration-min", type=positive_int, default=5,
                    help="Measured duration in minutes (ignored on --fast-run).")
+    p.add_argument("--duration-sec", type=positive_int, default=None,
+                   help="Alias: measurement duration in seconds. HammerDB's "
+                        "TCL only accepts whole minutes, so this is rounded "
+                        "up (max(1, ceil(sec/60))). Overrides --duration-min.")
     p.add_argument("--build-vu", type=positive_int, default=16,
                    help="Virtual users used for schema BUILD/load.")
     p.add_argument("--hammerdb", type=Path,
@@ -298,20 +304,35 @@ def hdb_build(*, hammerdb: Path, warehouses: int, build_vu: int,
 def hdb_run_one(*, hammerdb: Path, vu: int, rampup_min: int,
                 duration_min: int, superuser: str,
                 monitor_path: Path | None, pgdatadir: Path,
-                warehouses: int) -> tuple[int, int] | None:
+                warehouses: int,
+                flamegraph: str | None = None, fg_out: Path | None = None,
+                fg_scripts_dir: Path | None = None, fg_name: str = "sample",
+                ) -> tuple[int, int] | None:
     ensure_dir(log_dir)
     tcl = log_dir / f"hdb-run-w{warehouses}-vu{vu}.tcl"
     output = log_dir / f"hdb-run-w{warehouses}-vu{vu}.log"
     tcl.write_text(_run_tcl(vu, rampup_min, duration_min, superuser))
 
-    cm = (
+    rm = (
         ResourceMonitor(monitor_path, mount_point=pgdatadir,
                         pgdatadir=pgdatadir,
                         dsn=(f"host=127.0.0.1 port=5432 "
                              f"dbname={hdb_pg_dbase} user={hdb_pg_user}"))
         if monitor_path is not None else contextlib.nullcontext()
     )
-    with stage(f"hdb run w={warehouses} vu={vu}"), cm:
+    fg = (
+        BackendSampler(
+            flamegraph, fg_out, fg_name,
+            duration_sec=(rampup_min + duration_min) * 60,
+            fg_scripts_dir=fg_scripts_dir, db=hdb_pg_dbase,
+            # Wait for rampup to finish (HammerDB's rampup phase is when
+            # the VUs attach + settle), then sample the rest.
+            delay_start_sec=max(5, rampup_min * 60),
+        )
+        if flamegraph is not None and fg_out is not None
+        else contextlib.nullcontext()
+    )
+    with stage(f"hdb run w={warehouses} vu={vu}"), rm, fg:
         raw = _hammerdb_run(tcl, hammerdb, output_path=output)
     return parse_hdb_result(raw)
 
@@ -334,7 +355,10 @@ def main(argv: list[str] | None = None) -> int:
         fast_msg = "FAST RUN!"
     else:
         rampup_min = args.rampup_min
-        duration_min = args.duration_min
+        # --duration-sec is the newer unified flag; convert up to whole
+        # minutes since HammerDB's TCL doesn't accept anything finer.
+        duration_min = (max(1, math.ceil(args.duration_sec / 60))
+                        if args.duration_sec is not None else args.duration_min)
         warehouses_list = list(args.warehouses)
         vu_list = list(args.vu)
         fast_msg = ""
@@ -347,6 +371,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     if monitor_dir is not None:
         ensure_dir(monitor_dir)
+    fg_dir = (args.results_dir / f"{args.patch_id}-tpcc_hdb-flamegraphs"
+              if args.flamegraph else None)
+    if fg_dir is not None:
+        ensure_dir(fg_dir)
 
     append_line(result_file, f"# {fast_msg} {now_str()}")
     append_line(result_file, "# warehouses, vu, nopm, tpm")
@@ -384,6 +412,10 @@ def main(argv: list[str] | None = None) -> int:
                     superuser=superuser,
                     monitor_path=monitor_path, pgdatadir=pgdatadir,
                     warehouses=w,
+                    flamegraph=args.flamegraph,
+                    fg_out=fg_dir,
+                    fg_scripts_dir=args.flamegraph_fg_dir,
+                    fg_name=f"w{w}-vu{vu}",
                 )
                 if result is None:
                     log.warning("    w=%d vu=%d: no NOPM/TPM in HammerDB output", w, vu)

@@ -23,6 +23,7 @@ from pathlib import Path
 
 import common
 from common import (
+    BackendSampler,
     BenchError,
     Preflight,
     ResourceMonitor,
@@ -94,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Connection counts (overrides --linear-scale).")
     p.add_argument("--go-tpc", type=Path, default=go_tpc_binary,
                    help="Path to go-tpc binary (used only to load schema/data).")
+    p.add_argument("--duration-sec", type=positive_int, default=100,
+                   help="Measurement duration in seconds (ignored on --fast-run).")
     return p
 
 
@@ -177,6 +180,8 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
 def run_pgbench_measure(
     *, warehouses: int, conns: int, run_time: int,
     monitor_path: Path | None, pgdatadir: Path,
+    flamegraph: str | None = None, fg_out: Path | None = None,
+    fg_scripts_dir: Path | None = None, fg_name: str = "sample",
 ) -> int | None:
     """Run pgbench with the 5 weighted -f scripts. Returns total tps."""
     # TPC-C is intrinsically deadlock-prone (NEW_ORDER + PAYMENT both touch
@@ -197,12 +202,19 @@ def run_pgbench_measure(
     for sql, weight in pgb_scripts:
         cmd += ["-f", f"{script_dir / sql}@{weight}"]
 
-    cm = (
+    rm = (
         ResourceMonitor(monitor_path, mount_point=pgdatadir,
                         pgdatadir=pgdatadir)
         if monitor_path is not None else contextlib.nullcontext()
     )
-    with cm:
+    fg = (
+        BackendSampler(flamegraph, fg_out, fg_name,
+                       duration_sec=run_time,
+                       fg_scripts_dir=fg_scripts_dir)
+        if flamegraph is not None and fg_out is not None
+        else contextlib.nullcontext()
+    )
+    with rm, fg:
         proc = run(cmd, capture=True)
     return parse_pgbench_tps(proc.stdout or "")
 
@@ -225,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         warehouses_list = [47, 22]
         fast_msg = "FAST RUN!"
     else:
-        run_time = 100
+        run_time = args.duration_sec
         warehouses_list = list(args.warehouses)
         fast_msg = ""
 
@@ -234,6 +246,10 @@ def main(argv: list[str] | None = None) -> int:
     monitor_dir = args.results_dir / f"{args.patch_id}-tpcc_pgb-resources"
     if args.extended_logging:
         ensure_dir(monitor_dir)
+    fg_dir = (args.results_dir / f"{args.patch_id}-tpcc_pgb-flamegraphs"
+              if args.flamegraph else None)
+    if fg_dir is not None:
+        ensure_dir(fg_dir)
 
     for w in warehouses_list:
         pgdatadir = data_dir_for(args.pgdata_base, engine=args.engine,
@@ -269,6 +285,10 @@ def main(argv: list[str] | None = None) -> int:
                 tps = run_pgbench_measure(
                     warehouses=w, conns=a, run_time=run_time,
                     monitor_path=monitor_path, pgdatadir=pgdatadir,
+                    flamegraph=args.flamegraph,
+                    fg_out=fg_dir,
+                    fg_scripts_dir=args.flamegraph_fg_dir,
+                    fg_name=f"w{w}-c{a}",
                 )
                 if tps is None:
                     log.warning("    w=%d conns=%d: no tps line in pgbench output",

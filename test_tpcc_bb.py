@@ -27,6 +27,7 @@ from pathlib import Path
 
 import common
 from common import (
+    BackendSampler,
     BenchError,
     Preflight,
     ResourceMonitor,
@@ -139,10 +140,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--terminals", nargs="+", type=positive_int, metavar="N",
                    default=default_terminals,
                    help="Terminal counts (BenchBase analog of tpcc conns).")
-    p.add_argument("--rampup-min", type=positive_int, default=1,
-                   help="Warmup time in minutes (ignored on --fast-run).")
-    p.add_argument("--duration-min", type=positive_int, default=3,
-                   help="Measured duration in minutes (ignored on --fast-run).")
+    p.add_argument("--rampup-sec", type=positive_int, default=60,
+                   help="Warmup time in seconds (ignored on --fast-run).")
+    p.add_argument("--duration-sec", type=positive_int, default=100,
+                   help="Measurement duration in seconds (ignored on --fast-run).")
     p.add_argument("--benchbase", type=Path, default=default_benchbase_dir,
                    help="Path to the extracted benchbase-postgres tree "
                         "(contains benchbase.jar).")
@@ -254,20 +255,36 @@ def bb_run_one(*, benchbase: Path, warehouses: int, terminals: int,
                rampup_sec: int, duration_sec: int, user: str,
                output_dir: Path,
                monitor_path: Path | None, pgdatadir: Path,
+               flamegraph: str | None = None, fg_out: Path | None = None,
+               fg_scripts_dir: Path | None = None, fg_name: str = "sample",
                ) -> float | None:
     cfg_path = log_dir / f"bb-run-w{warehouses}-t{terminals}.xml"
     cfg_path.write_text(render_config(
         warehouses=warehouses, terminals=terminals,
         rampup_sec=rampup_sec, duration_sec=duration_sec, user=user,
     ))
-    cm = (
+    rm = (
         ResourceMonitor(
             monitor_path, mount_point=pgdatadir, pgdatadir=pgdatadir,
             dsn=f"host=127.0.0.1 port=5432 dbname={bb_db} user={user}",
         )
         if monitor_path is not None else contextlib.nullcontext()
     )
-    with stage(f"bb run w={warehouses} t={terminals}"), cm:
+    fg = (
+        BackendSampler(
+            flamegraph, fg_out, fg_name,
+            duration_sec=rampup_sec + duration_sec,
+            fg_scripts_dir=fg_scripts_dir, db=bb_db,
+            # BenchBase's rampup phase runs against the same terminals but
+            # excludes those txns from the throughput number. We sample
+            # across the whole thing; kicking in after rampup would need
+            # coordination we don't have.
+            delay_start_sec=max(5, rampup_sec // 4),
+        )
+        if flamegraph is not None and fg_out is not None
+        else contextlib.nullcontext()
+    )
+    with stage(f"bb run w={warehouses} t={terminals}"), rm, fg:
         out = _bb_run(benchbase=benchbase, config=cfg_path,
                       output_dir=output_dir,
                       create=False, load=False, execute=True,
@@ -288,8 +305,8 @@ def main(argv: list[str] | None = None) -> int:
         terminals_list = [10, 4]
         fast_msg = "FAST RUN!"
     else:
-        rampup_sec = args.rampup_min * 60
-        duration_sec = args.duration_min * 60
+        rampup_sec = args.rampup_sec
+        duration_sec = args.duration_sec
         warehouses_list = list(args.warehouses)
         terminals_list = list(args.terminals)
         fast_msg = ""
@@ -307,6 +324,10 @@ def main(argv: list[str] | None = None) -> int:
     # separate from our result files but under results_dir for traceability.
     bb_out_dir = args.results_dir / f"{args.patch_id}-tpcc_bb-benchbase-out"
     ensure_dir(bb_out_dir)
+    fg_dir = (args.results_dir / f"{args.patch_id}-tpcc_bb-flamegraphs"
+              if args.flamegraph else None)
+    if fg_dir is not None:
+        ensure_dir(fg_dir)
 
     append_line(result_file, f"# {fast_msg} {now_str()}")
     append_line(result_file, "# warehouses, terminals, tps, tpm")
@@ -343,6 +364,10 @@ def main(argv: list[str] | None = None) -> int:
                     rampup_sec=rampup_sec, duration_sec=duration_sec,
                     user=user, output_dir=bb_out_dir,
                     monitor_path=monitor_path, pgdatadir=pgdatadir,
+                    flamegraph=args.flamegraph,
+                    fg_out=fg_dir,
+                    fg_scripts_dir=args.flamegraph_fg_dir,
+                    fg_name=f"w{w}-t{t}",
                 )
                 if tps is None:
                     log.warning("    w=%d terminals=%d: no Throughput line "

@@ -76,9 +76,16 @@ compiler_cc = {
 valid_compilers = tuple(compiler_cc.keys())
 
 
-def build_id(kind: str, ref: str, compiler: str) -> str:
-    """Identifier for one (kind, ref, compiler) build — used as patch_id."""
-    return f"{kind}-{common._sanitize_log_name(ref)}-{compiler}"
+def build_id(kind: str, ref: str, compiler: str,
+             frame_pointer: bool = False) -> str:
+    """Identifier for one (kind, ref, compiler) build — used as patch_id.
+
+    `-fp` suffix is appended when the build was compiled with
+    -fno-omit-frame-pointer, so a plain and a frame-pointer variant of
+    the same ref coexist under pgbin/ without conflict.
+    """
+    base = f"{kind}-{common._sanitize_log_name(ref)}-{compiler}"
+    return f"{base}-fp" if frame_pointer else base
 
 
 def data_id(kind: str, ref: str) -> str:
@@ -166,6 +173,17 @@ def build_parser() -> argparse.ArgumentParser:
              "top-50 report alongside each test's result file.",
     )
     p.add_argument(
+        "--flamegraph", choices=("perf", "gdb"), default=None,
+        help="Sample one random client backend per TPC-C measurement point "
+             "and save raw samples + a flamegraph SVG. Implies --frame-pointer.",
+    )
+    p.add_argument(
+        "--frame-pointer", action="store_true",
+        help="Build PG with -fno-omit-frame-pointer (auto-enabled by "
+             "--flamegraph). Build id gains a '-fp' suffix so the plain "
+             "build coexists on disk.",
+    )
+    p.add_argument(
         "--results-dir", type=Path, default=default_results_dir,
         help="Where result files are written.",
     )
@@ -218,6 +236,11 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument("--tpcc-stored-procs", action="store_true",
                     help="TPC-C (go-tpc): dispatch transactions as PL/pgSQL "
                          "stored procedures (postgres driver only).")
+    tp.add_argument("--tpcc-duration-sec", type=common.positive_int, default=100,
+                    help="TPC-C: measurement duration per (warehouses, conns) "
+                         "point in seconds. Applies uniformly to tpcc, "
+                         "tpcc_pgb, tpcc_bb and (rounded up to whole minutes) "
+                         "tpcc_hdb.")
 
     ib = p.add_argument_group("ibench")
     ib.add_argument("--ibench-scale-mul", type=common.positive_int,
@@ -231,19 +254,13 @@ def build_parser() -> argparse.ArgumentParser:
     hdb = p.add_argument_group("tpcc_hdb (HammerDB stored-procedure TPC-C)")
     hdb.add_argument("--hdb-rampup-min", type=common.positive_int, default=2,
                      help="HammerDB: rampup time in minutes (ignored on --fast-run).")
-    hdb.add_argument("--hdb-duration-min", type=common.positive_int, default=5,
-                     help="HammerDB: measurement duration in minutes "
-                          "(ignored on --fast-run).")
     hdb.add_argument("--hdb-build-vu", type=common.positive_int, default=16,
                      help="HammerDB: virtual users used for schema BUILD.")
 
     bb = p.add_argument_group("tpcc_bb (BenchBase TPC-C)")
-    bb.add_argument("--bb-rampup-min", type=common.positive_int, default=1,
-                    help="BenchBase: warmup time in minutes (ignored on "
+    bb.add_argument("--bb-rampup-sec", type=common.positive_int, default=60,
+                    help="BenchBase: warmup time in seconds (ignored on "
                          "--fast-run).")
-    bb.add_argument("--bb-duration-min", type=common.positive_int, default=3,
-                    help="BenchBase: measurement duration in minutes "
-                         "(ignored on --fast-run).")
 
     return p
 
@@ -336,7 +353,8 @@ def read_pg_patchset_for_oriole(orioledb_dir: Path) -> str:
     raise BenchError(f"No PG17 patchset entry found in {pgtags}")
 
 
-def build_orioledb(ref: str, compiler: str, bid: str, *, force: bool) -> None:
+def build_orioledb(ref: str, compiler: str, bid: str, *,
+                   force: bool, frame_pointer: bool = False) -> None:
     workspace = script_dir / "pgbin" / bid
     if pg_build_exists(workspace) and not force:
         log.info("Reusing PG/orioledb build %s at %s", bid, workspace)
@@ -367,9 +385,10 @@ def build_orioledb(ref: str, compiler: str, bid: str, *, force: bool) -> None:
         }
         nproc = str(cpu_count())
 
+        cflags = "-O3 -fno-omit-frame-pointer" if frame_pointer else "-O3"
         run(["./configure", "--enable-debug", "--disable-cassert",
              "--enable-tap-tests", "--with-icu",
-             f"--prefix={workspace}", f"CC={cc}", "CFLAGS=-O3"],
+             f"--prefix={workspace}", f"CC={cc}", f"CFLAGS={cflags}"],
             cwd=pg_oriole_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s"], cwd=pg_oriole_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s", "install"], cwd=pg_oriole_dir, env=overlay_env)
@@ -394,7 +413,8 @@ def build_orioledb(ref: str, compiler: str, bid: str, *, force: bool) -> None:
             cwd=orioledb_dir, env=overlay_env)
 
 
-def build_pg_master(ref: str, compiler: str, bid: str, *, force: bool) -> None:
+def build_pg_master(ref: str, compiler: str, bid: str, *,
+                    force: bool, frame_pointer: bool = False) -> None:
     workspace = script_dir / "pgbin" / bid
     if pg_build_exists(workspace) and not force:
         log.info("Reusing PG master build %s at %s", bid, workspace)
@@ -417,9 +437,10 @@ def build_pg_master(ref: str, compiler: str, bid: str, *, force: bool) -> None:
         # incremental rebuilds and break extension dlopen.
         run(["git", "clean", "-fdx"], cwd=pg_dir)
         nproc = str(cpu_count())
+        cflags = "-O3 -fno-omit-frame-pointer" if frame_pointer else "-O3"
         run(["./configure", "--enable-debug", "--disable-cassert",
              "--enable-tap-tests", "--with-icu",
-             f"--prefix={workspace}", f"CC={cc}", "CFLAGS=-O3"],
+             f"--prefix={workspace}", f"CC={cc}", f"CFLAGS={cflags}"],
             cwd=pg_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s"], cwd=pg_dir, env=overlay_env)
         run(["make", "-j", nproc, "-s", "install"], cwd=pg_dir, env=overlay_env)
@@ -428,21 +449,30 @@ def build_pg_master(ref: str, compiler: str, bid: str, *, force: bool) -> None:
             cwd=pg_dir, env=overlay_env)
 
 
+def _needs_frame_pointer(args: argparse.Namespace) -> bool:
+    """Frame-pointer build is on when the user asked for it explicitly
+    or when --flamegraph is on (perf/gdb both want cheap unwinding)."""
+    return bool(getattr(args, "frame_pointer", False)
+                or getattr(args, "flamegraph", None))
+
+
 def oriole_builds(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
     """
     Cartesian product of --oriole-id × --compiler, each as
     (ref, compiler, build_id, data_id).
     """
+    fp = _needs_frame_pointer(args)
     return [
-        (ref, c, build_id("orioledb", ref, c), data_id("orioledb", ref))
+        (ref, c, build_id("orioledb", ref, c, fp), data_id("orioledb", ref))
         for ref in args.oriole_id for c in args.compiler
     ]
 
 
 def pg_builds(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
     """Cartesian product of --pg-id × --compiler."""
+    fp = _needs_frame_pointer(args)
     return [
-        (ref, c, build_id("pg", ref, c), data_id("pg", ref))
+        (ref, c, build_id("pg", ref, c, fp), data_id("pg", ref))
         for ref in args.pg_id for c in args.compiler
     ]
 
@@ -458,14 +488,18 @@ def build_phase(args: argparse.Namespace) -> None:
                 repo_clone_or_fetch(postgres_oriole_repo, script_dir / "postgres-oriole")
             with stage("orioledb prerequisites"):
                 ensure_orioledb_prerequisites(args)
+            fp = _needs_frame_pointer(args)
             for ref, compiler, bid, _did in oriole_builds(args):
-                build_orioledb(ref, compiler, bid, force=args.reinitialize)
+                build_orioledb(ref, compiler, bid,
+                               force=args.reinitialize, frame_pointer=fp)
 
         if args.pg_id:
             with stage("clone sources (pg master)"):
                 repo_clone_or_fetch(postgres_master_repo, script_dir / "postgres-master")
+            fp = _needs_frame_pointer(args)
             for ref, compiler, bid, _did in pg_builds(args):
-                build_pg_master(ref, compiler, bid, force=args.reinitialize)
+                build_pg_master(ref, compiler, bid,
+                                force=args.reinitialize, frame_pointer=fp)
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +636,18 @@ def build_go_tpc(*, force: bool) -> None:
             raise BenchError(f"go-tpc binary not produced at {binary}")
 
 
+def install_perf(*, needed: bool) -> None:
+    """Install `perf` (linux-tools-{common,generic}) if missing and needed.
+    On non-Debian Linuxes or when perf is already present, this is a no-op."""
+    if not needed:
+        return
+    if shutil.which("perf") is not None:
+        log.info("Reusing existing perf (in PATH).")
+        return
+    with stage("install perf"):
+        common.apt_install(["linux-tools-common", "linux-tools-generic"])
+
+
 def install_jdk(*, needed: bool) -> None:
     """Install OpenJDK 21 (BenchBase needs Java 21+). No-op if `java` is
     already on PATH — we trust whatever the user has."""
@@ -706,6 +752,13 @@ def setup_test_environment(args: argparse.Namespace) -> None:
         install_jdk(needed=need_benchbase)
         build_benchbase(force=args.reinitialize, needed=need_benchbase)
 
+        # Flamegraph tooling: perf (only if --flamegraph=perf) + the
+        # Brendan Gregg FlameGraph scripts checkout used by both modes.
+        if args.flamegraph == "perf":
+            install_perf(needed=True)
+        if args.flamegraph is not None:
+            common.ensure_flamegraph_scripts(common.flamegraph_dir_default)
+
         run(["sudo", "mkdir", "-p", str(args.pgdata_base)])
         if args.nvme:
             mount_nvme()
@@ -742,6 +795,12 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
         cli.append("--reuse-data")
     if args.extended_logging:
         cli.append("--extended-logging")
+    # --flamegraph applies to TPC-C variants only; the child scripts accept
+    # it via add_common_test_args so passing here is safe. pgbench/ibench
+    # also accept the flag (no-op) since it's added centrally.
+    if args.flamegraph is not None and test_name.startswith("tpcc"):
+        cli += ["--flamegraph", args.flamegraph,
+                "--flamegraph-fg-dir", str(common.flamegraph_dir_default)]
 
     if test_name == "pgbench":
         if args.precise_pgbench:
@@ -762,6 +821,7 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
             cli += ["--conns", *(str(c) for c in args.tpcc_conns)]
         if args.tpcc_stored_procs:
             cli.append("--stored-procs")
+        cli += ["--duration-sec", str(args.tpcc_duration_sec)]
     elif test_name == "tpcc_pgb":
         if args.linear_scale:
             cli.append("--linear-scale")
@@ -771,6 +831,7 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
             cli += ["--warehouses", *(str(w) for w in args.warehouses)]
         if args.tpcc_conns:
             cli += ["--conns", *(str(c) for c in args.tpcc_conns)]
+        cli += ["--duration-sec", str(args.tpcc_duration_sec)]
     elif test_name == "tpcc_hdb":
         if args.warehouses:
             cli += ["--warehouses", *(str(w) for w in args.warehouses)]
@@ -779,7 +840,7 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
         cli += [
             "--hammerdb", str(script_dir / "hammerdb"),
             "--rampup-min", str(args.hdb_rampup_min),
-            "--duration-min", str(args.hdb_duration_min),
+            "--duration-sec", str(args.tpcc_duration_sec),
             "--build-vu", str(args.hdb_build_vu),
         ]
     elif test_name == "tpcc_bb":
@@ -789,8 +850,8 @@ def child_args_for(test_name: str, *, args: argparse.Namespace,
             cli += ["--terminals", *(str(c) for c in args.tpcc_conns)]
         cli += [
             "--benchbase", str(script_dir / "benchbase"),
-            "--rampup-min", str(args.bb_rampup_min),
-            "--duration-min", str(args.bb_duration_min),
+            "--rampup-sec", str(args.bb_rampup_sec),
+            "--duration-sec", str(args.tpcc_duration_sec),
         ]
     elif test_name == "ibench":
         if args.ibench_scale_mul is not None:

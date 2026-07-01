@@ -600,6 +600,19 @@ def add_common_test_args(parser: argparse.ArgumentParser) -> None:
         help="Collect per-second resource stats (CPU, disk IO, wait events) "
              "to a JSONL file next to the result file.",
     )
+    parser.add_argument(
+        "--flamegraph", choices=("perf", "gdb"), default=None,
+        help="Sample one random client backend for the full measurement "
+             "duration and save raw samples + a flamegraph SVG per "
+             "measurement point. Requires the build to have been made with "
+             "--frame-pointer (see tests.py). Ignored by non-TPC-C drivers.",
+    )
+    parser.add_argument(
+        "--flamegraph-fg-dir", type=Path,
+        default=flamegraph_dir_default,
+        help="Path to the Brendan Gregg FlameGraph scripts checkout "
+             "(stackcollapse-perf.pl, stackcollapse-gdb.pl, flamegraph.pl).",
+    )
 
 
 def positive_int(value: str) -> int:
@@ -1212,7 +1225,11 @@ class ResourceMonitor:
         )
 
         try:
-            with open(self.output_path, "w") as out_file:
+            # Append so that re-runs against the same (patch, w, c) point
+            # preserve prior samples — matches how result_file / pgss files
+            # already behave. Callers who want a clean file should delete
+            # it beforehand.
+            with open(self.output_path, "a") as out_file:
                 prev_cpu = psutil.cpu_times()
                 prev_io = psutil.disk_io_counters()
                 cpus = psutil.cpu_count() or 1
@@ -1296,6 +1313,267 @@ class ResourceMonitor:
                     conn.close()
                 except Exception:
                     pass
+
+
+# ---------------------------------------------------------------------------
+# BackendSampler — attach `perf record` or a poor-man's-profiler gdb loop
+# to one random client backend for the full measurement duration, save the
+# raw samples, and turn them into a Brendan-Gregg flamegraph SVG.
+# ---------------------------------------------------------------------------
+
+flamegraph_dir_default = script_dir / "FlameGraph"
+flamegraph_repo = "https://github.com/brendangregg/FlameGraph.git"
+
+
+def ensure_flamegraph_scripts(fg_dir: Path) -> None:
+    """
+    Make sure the Brendan Gregg FlameGraph scripts exist under `fg_dir`.
+    Clones the repo shallowly if the checkout is missing. Safe to call
+    from multiple call sites — no-op when scripts are already present.
+    """
+    fg_dir = Path(fg_dir)
+    if (fg_dir / "flamegraph.pl").is_file():
+        return
+    fg_dir.parent.mkdir(parents=True, exist_ok=True)
+    log.info("Cloning FlameGraph scripts to %s", fg_dir)
+    if fg_dir.exists() and not (fg_dir / ".git").exists():
+        # Half-populated directory from a broken previous attempt; wipe it.
+        shutil.rmtree(fg_dir)
+    run(["git", "clone", "--depth=1", flamegraph_repo, str(fg_dir)])
+
+
+class BackendSampler:
+    """
+    Context manager. In __enter__ starts a background thread that:
+
+        1. Waits `delay_start_sec` for backends to actually run queries.
+        2. Picks one random `client backend` PID from pg_stat_activity.
+        3. Runs perf/gdb sampling for the remainder of the duration.
+
+    In __exit__ waits for the sampler to finish and post-processes the
+    raw output into <name>.<mode>.folded and <name>.<mode>.svg using
+    FlameGraph scripts (stackcollapse-perf.pl / stackcollapse-gdb.pl /
+    flamegraph.pl) from `fg_scripts_dir`.
+
+    Failure modes (no backend, perf/gdb missing, FlameGraph scripts
+    missing, post-processing errors) are downgraded to a WARN so the
+    benchmark itself doesn't abort.
+    """
+
+    def __init__(
+        self,
+        mode: str,
+        out_dir: Path,
+        name: str,
+        duration_sec: int,
+        *,
+        fg_scripts_dir: Path | None = None,
+        db: str = "postgres",
+        delay_start_sec: int = 5,
+        perf_freq: int = 99,
+        gdb_hz: int = 10,
+    ) -> None:
+        if mode not in ("perf", "gdb"):
+            raise BenchError(
+                f"BackendSampler mode must be 'perf' or 'gdb' (got {mode!r})"
+            )
+        self.mode = mode
+        self.out_dir = Path(out_dir)
+        self.name = _sanitize_log_name(name) or "sample"
+        self.duration_sec = duration_sec
+        self.fg_scripts_dir = Path(fg_scripts_dir or flamegraph_dir_default)
+        self.db = db
+        self.delay_start_sec = delay_start_sec
+        self.perf_freq = perf_freq
+        self.gdb_hz = gdb_hz
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._pid: int | None = None
+        self._raw_path: Path | None = None
+
+    def _base(self) -> Path:
+        return self.out_dir / f"{self.name}.{self.mode}"
+
+    def __enter__(self) -> "BackendSampler":
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        # Auto-clone FlameGraph on first use so the driver works without
+        # tests.py having pre-populated the checkout.
+        try:
+            ensure_flamegraph_scripts(self.fg_scripts_dir)
+        except BenchError as e:
+            log.warning("BackendSampler: could not fetch FlameGraph "
+                        "scripts (%s); SVG rendering will be skipped", e)
+        self._thread = threading.Thread(
+            target=self._run, name="backend-sampler", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.duration_sec + 30)
+        if exc_type is not None or self._raw_path is None:
+            return
+        try:
+            if self.mode == "perf":
+                self._render_perf()
+            else:
+                self._render_gdb()
+        except Exception as e:  # noqa: BLE001
+            log.warning("BackendSampler: flamegraph render failed: %s", e)
+
+    def _pick_pid(self) -> int | None:
+        try:
+            proc = subprocess.run(
+                ["psql", f"-d{self.db}", "-At", "-c",
+                 "SELECT pid FROM pg_stat_activity "
+                 "WHERE backend_type='client backend' "
+                 "ORDER BY random() LIMIT 1"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        out = (proc.stdout or "").strip()
+        return int(out) if out.isdigit() else None
+
+    def _run(self) -> None:
+        if self._stop.wait(self.delay_start_sec):
+            return
+        self._pid = self._pick_pid()
+        if self._pid is None:
+            log.warning(
+                "BackendSampler: no client backend to sample (db=%s)", self.db
+            )
+            return
+        sample_time = max(
+            1, int(self.duration_sec - self.delay_start_sec - 2)
+        )
+        log.info(
+            "BackendSampler[%s]: sampling pid=%d for %ds -> %s",
+            self.mode, self._pid, sample_time, self._base(),
+        )
+        try:
+            if self.mode == "perf":
+                self._sample_perf(sample_time)
+            else:
+                self._sample_gdb(sample_time)
+        except Exception as e:  # noqa: BLE001
+            log.warning("BackendSampler: sampling failed: %s", e)
+
+    def _sample_perf(self, sample_time: int) -> None:
+        data = self._base().with_name(self._base().name + ".data")
+        # `perf record -p PID -- sleep N` attaches to PID and stops when the
+        # trailing `sleep` exits. We route stdout/stderr to the current stage
+        # log so a perf error message still ends up somewhere findable.
+        target = log_router.current
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a") as f:
+            f.write(f"(sampler) $ perf record -p {self._pid} → {data}\n")
+            f.flush()
+            proc = subprocess.Popen(
+                ["sudo", "perf", "record",
+                 "-F", str(self.perf_freq), "-g",
+                 "-o", str(data),
+                 "-p", str(self._pid),
+                 "--", "sleep", str(sample_time)],
+                stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            # Wait for perf to finish (either sleep expiring or __exit__ SIGTERM).
+            while proc.poll() is None:
+                if self._stop.wait(1.0):
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                    break
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        if data.is_file() and data.stat().st_size > 0:
+            self._raw_path = data
+
+    def _sample_gdb(self, sample_time: int) -> None:
+        stacks = self._base().with_name(self._base().name + ".txt")
+        target = log_router.current
+        target.parent.mkdir(parents=True, exist_ok=True)
+        interval = 1.0 / max(1, self.gdb_hz)
+        end = time.monotonic() + sample_time
+        # `-ex "set print asm-demangle on"` improves C++ names too. `-ex "bt"`
+        # dumps the current thread only, which is what stackcollapse-gdb.pl
+        # expects.
+        gdb_cmd = [
+            "sudo", "gdb", "-batch",
+            "-ex", "set pagination off",
+            "-ex", "set print asm-demangle on",
+            "-ex", "bt",
+            "-p", str(self._pid),
+        ]
+        with open(stacks, "a") as f, open(target, "a") as tgt:
+            tgt.write(f"(sampler) gdb bt {self._pid} @ {self.gdb_hz}Hz → {stacks}\n")
+            tgt.flush()
+            while not self._stop.is_set() and time.monotonic() < end:
+                try:
+                    proc = subprocess.run(
+                        gdb_cmd, capture_output=True, text=True, timeout=5,
+                    )
+                    f.write(proc.stdout or "")
+                    f.write("\n")
+                    f.flush()
+                except (subprocess.SubprocessError, OSError) as e:
+                    tgt.write(f"(sampler) gdb invocation failed: {e}\n")
+                    tgt.flush()
+                if self._stop.wait(interval):
+                    break
+        if stacks.is_file() and stacks.stat().st_size > 0:
+            self._raw_path = stacks
+
+    def _render_perf(self) -> None:
+        assert self._raw_path is not None
+        base = self._base()
+        script_out = base.with_name(base.name + ".script")
+        folded = base.with_name(base.name + ".folded")
+        svg = base.with_name(base.name + ".svg")
+        collapse = self.fg_scripts_dir / "stackcollapse-perf.pl"
+        flame = self.fg_scripts_dir / "flamegraph.pl"
+        for f in (collapse, flame):
+            if not f.is_file():
+                log.warning("BackendSampler: %s missing — skipping SVG", f)
+                return
+        with open(script_out, "w") as f:
+            subprocess.run(
+                ["sudo", "perf", "script", "-i", str(self._raw_path)],
+                stdout=f, check=True,
+            )
+        with open(folded, "w") as f:
+            subprocess.run([str(collapse), str(script_out)],
+                           stdout=f, check=True)
+        with open(svg, "w") as f:
+            subprocess.run([str(flame), str(folded)],
+                           stdout=f, check=True)
+        log.info("BackendSampler[perf]: %s", svg)
+
+    def _render_gdb(self) -> None:
+        assert self._raw_path is not None
+        base = self._base()
+        folded = base.with_name(base.name + ".folded")
+        svg = base.with_name(base.name + ".svg")
+        collapse = self.fg_scripts_dir / "stackcollapse-gdb.pl"
+        flame = self.fg_scripts_dir / "flamegraph.pl"
+        for f in (collapse, flame):
+            if not f.is_file():
+                log.warning("BackendSampler: %s missing — skipping SVG", f)
+                return
+        with open(folded, "w") as f:
+            subprocess.run([str(collapse), str(self._raw_path)],
+                           stdout=f, check=True)
+        with open(svg, "w") as f:
+            subprocess.run([str(flame), str(folded)],
+                           stdout=f, check=True)
+        log.info("BackendSampler[gdb]: %s", svg)
 
 
 # ---------------------------------------------------------------------------

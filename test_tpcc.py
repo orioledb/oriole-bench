@@ -16,6 +16,7 @@ from pathlib import Path
 
 import common
 from common import (
+    BackendSampler,
     BenchError,
     Preflight,
     ResourceMonitor,
@@ -73,6 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stored-procs", action="store_true",
                    help="Use go-tpc's PL/pgSQL stored-procedure mode "
                         "(postgres driver only).")
+    p.add_argument("--duration-sec", type=positive_int, default=100,
+                   help="Measurement duration in seconds (ignored on --fast-run).")
     return p
 
 
@@ -146,7 +149,10 @@ def prepare_cluster(pgdatadir: Path, engine: str, memory_buffers: str,
 
 def run_tpcc_measure(
     *, go_tpc: Path, warehouses: int, conns: int, measure_time: str,
+    duration_sec: int,
     monitor_path: Path | None, pgdatadir: Path, stored_procs: bool = False,
+    flamegraph: str | None = None, fg_out: Path | None = None,
+    fg_scripts_dir: Path | None = None, fg_name: str = "sample",
 ) -> int | None:
     cmd = [
         str(go_tpc), "tpcc",
@@ -159,12 +165,19 @@ def run_tpcc_measure(
     ]
     if stored_procs:
         cmd.append("--stored-procs")
-    cm = (
+    rm = (
         ResourceMonitor(monitor_path, mount_point=pgdatadir,
                         pgdatadir=pgdatadir)
         if monitor_path is not None else contextlib.nullcontext()
     )
-    with cm:
+    fg = (
+        BackendSampler(flamegraph, fg_out, fg_name,
+                       duration_sec=duration_sec,
+                       fg_scripts_dir=fg_scripts_dir)
+        if flamegraph is not None and fg_out is not None
+        else contextlib.nullcontext()
+    )
+    with rm, fg:
         proc = run(cmd, capture=True)
     return parse_tpcc_tpm(proc.stdout or "")
 
@@ -187,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         warehouses_list = [47, 22]
         fast_msg = "FAST RUN!"
     else:
-        measure_time = "100s"
+        measure_time = f"{args.duration_sec}s"
         warehouses_list = list(args.warehouses)
         fast_msg = ""
 
@@ -196,6 +209,10 @@ def main(argv: list[str] | None = None) -> int:
     monitor_dir = args.results_dir / f"{args.patch_id}-tpcc-resources"
     if args.extended_logging:
         ensure_dir(monitor_dir)
+    fg_dir = (args.results_dir / f"{args.patch_id}-tpcc-flamegraphs"
+              if args.flamegraph else None)
+    if fg_dir is not None:
+        ensure_dir(fg_dir)
 
     for w in warehouses_list:
         pgdatadir = data_dir_for(args.pgdata_base, engine=args.engine,
@@ -231,8 +248,13 @@ def main(argv: list[str] | None = None) -> int:
                 tpm = run_tpcc_measure(
                     go_tpc=args.go_tpc, warehouses=w, conns=a,
                     measure_time=measure_time,
+                    duration_sec=int(measure_time.rstrip("s")),
                     monitor_path=monitor_path, pgdatadir=pgdatadir,
                     stored_procs=args.stored_procs,
+                    flamegraph=args.flamegraph,
+                    fg_out=fg_dir,
+                    fg_scripts_dir=args.flamegraph_fg_dir,
+                    fg_name=f"w{w}-c{a}",
                 )
                 if tpm is None:
                     log.warning("    w=%d conns=%d: no tpmTotal in output", w, a)
